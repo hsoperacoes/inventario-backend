@@ -430,6 +430,80 @@ def montar_confronto_estoque(db: Session, id_inventario: str):
     }
 
 
+
+
+@app.get("/estoque/validar")
+def validar_estoque_por_ean(ean: str = "", db: Session = Depends(get_db)):
+    ean_norm = normalizar_ean(ean)
+    if not ean_norm:
+        return {
+            "success": True,
+            "encontrado": False,
+            "ean": "",
+            "item": None,
+            "message": "EAN não informado"
+        }
+
+    item = buscar_item_estoque_por_ean(db, ean_norm)
+    if not item:
+        return {
+            "success": True,
+            "encontrado": False,
+            "ean": ean_norm,
+            "item": None
+        }
+
+    ref = norm_txt(getattr(item, "produto", ""))
+    cor = norm_txt(getattr(item, "cor_produ", ""))
+    tamanho = norm_txt(getattr(item, "tamanho", ""))
+    ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
+
+    return {
+        "success": True,
+        "encontrado": True,
+        "ean": ean_norm,
+        "item": {
+            "ean": ean_norm,
+            "ref": ref,
+            "cor": cor,
+            "tamanho": tamanho,
+            "grade": tamanho,
+            "refCor": ref_cor,
+            "filial": norm_txt(getattr(item, "filial", "")),
+            "qtdEstoque": int(getattr(item, "quantidade", 0) or 0),
+            "labelCompact": f"{ref_cor} {tamanho}".strip(),
+            "label": f"{ref_cor} {tamanho}".strip(),
+        }
+    }
+
+
+@app.get("/estoque/mapa-mini")
+def estoque_mapa_mini(db: Session = Depends(get_db)):
+    itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+    mapa = {}
+    total = 0
+
+    for item in itens:
+        ean = normalizar_ean(getattr(item, "ean", ""))
+        if not ean:
+            continue
+
+        ref = norm_txt(getattr(item, "produto", ""))
+        cor = norm_txt(getattr(item, "cor_produ", ""))
+        tamanho = norm_txt(getattr(item, "tamanho", ""))
+        ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
+        label = f"{ref_cor} {tamanho}".strip()
+
+        mapa[ean] = label or ean
+        total += 1
+
+    return {
+        "success": True,
+        "mapa": mapa,
+        "total": total,
+        "geradoEm": datetime.utcnow().isoformat()
+    }
+
 @app.get("/")
 def home():
     return {"status": "API rodando com banco"}
