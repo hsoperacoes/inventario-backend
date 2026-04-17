@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -922,11 +922,16 @@ def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get
 
     buf = io.BytesIO()
     wb.save(buf)
-    buf.seek(0)
-    nome = f"relatorio_confronto_{inv or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
-    headers = {"Content-Disposition": f'attachment; filename="{nome}"'}
-    return StreamingResponse(
-        buf,
+    conteudo = buf.getvalue()
+    nome_base = f"relatorio_confronto_{inv or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+    nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{nome_seguro}\"; filename*=UTF-8''{quote(nome_base)}",
+        "Access-Control-Expose-Headers": "Content-Disposition",
+        "Cache-Control": "no-store"
+    }
+    return Response(
+        content=conteudo,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
