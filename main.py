@@ -16,11 +16,15 @@ from collections import defaultdict
 from datetime import datetime
 from urllib.parse import quote
 from typing import Optional
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
-from reportlab.graphics.barcode import createBarcodeDrawing
-from reportlab.graphics import renderPDF
+
+
+def _import_reportlab():
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.graphics.barcode import createBarcodeDrawing
+    from reportlab.graphics import renderPDF
+    return A4, mm, canvas, createBarcodeDrawing, renderPDF
 
 app = FastAPI(title="HS Inventário API")
 
@@ -222,6 +226,11 @@ def listar_etiquetas_pendentes(db: Session, id_inventario: str = ""):
 
 
 def gerar_pdf_etiquetas_bytes(etiquetas):
+    try:
+        A4, mm, canvas, createBarcodeDrawing, renderPDF = _import_reportlab()
+    except Exception as e:
+        raise RuntimeError("Biblioteca reportlab não está instalada no servidor. Instale com: pip install reportlab") from e
+
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     page_w, page_h = A4
