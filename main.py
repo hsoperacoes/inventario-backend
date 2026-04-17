@@ -63,6 +63,12 @@ class ResetarGrupoIn(BaseModel):
     id_grupo: str
 
 
+class EditarMetaIn(BaseModel):
+    id_inventario: str
+    id_grupo: str
+    nova_meta: int
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -314,6 +320,7 @@ def registrar_bipe(data: BipeIn, db: Session = Depends(get_db)):
     return {"success": True, "total_grupo": total_grupo}
 
 
+
 @app.post("/grupos/concluir")
 def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
     grupo = db.query(Grupo).filter(
@@ -332,6 +339,53 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
 
     if not usuario_ativo:
         raise HTTPException(status_code=400, detail="Usuário não está ativo nesse grupo")
+
+    total_grupo = db.query(func.count(Bipe.id)).filter(
+        Bipe.id_inventario == data.id_inventario,
+        Bipe.id_grupo == data.id_grupo
+    ).scalar() or 0
+
+    if int(total_grupo) != int(grupo.meta or 0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Divergência de meta: {int(total_grupo)}/{int(grupo.meta or 0)}"
+        )
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).all()
+
+    grupo.status = "CONCLUIDO"
+
+    db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).delete(synchronize_session=False)
+
+    db.commit()
+
+    return {
+        "success": True,
+        "grupo": grupo.nome,
+        "id_grupo": grupo.id,
+        "count": total_grupo,
+        "membros_removidos": [m.usuario for m in membros]
+    }
+
+
+
+
+
+@app.post("/grupos/concluir-forcado")
+def concluir_grupo_forcado(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
+    grupo = db.query(Grupo).filter(
+        Grupo.id == data.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
 
     total_grupo = db.query(func.count(Bipe.id)).filter(
         Bipe.id_inventario == data.id_inventario,
@@ -357,7 +411,43 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
         "grupo": grupo.nome,
         "id_grupo": grupo.id,
         "count": total_grupo,
+        "forcado": True,
         "membros_removidos": [m.usuario for m in membros]
+    }
+
+
+@app.post("/grupos/editar-meta")
+def editar_meta(data: EditarMetaIn, db: Session = Depends(get_db)):
+    grupo = db.query(Grupo).filter(
+        Grupo.id == data.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    if int(data.nova_meta or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Meta inválida")
+
+    grupo.meta = int(data.nova_meta)
+    if grupo.status == "CONCLUIDO":
+        grupo.status = "RESERVADO" if db.query(UsuarioAtivo).filter(
+            UsuarioAtivo.id_inventario == data.id_inventario,
+            UsuarioAtivo.id_grupo == data.id_grupo
+        ).first() else "DISPONIVEL"
+    db.commit()
+
+    total_grupo = db.query(func.count(Bipe.id)).filter(
+        Bipe.id_inventario == data.id_inventario,
+        Bipe.id_grupo == data.id_grupo
+    ).scalar() or 0
+
+    return {
+        "success": True,
+        "grupo": grupo.nome,
+        "id_grupo": grupo.id,
+        "nova_meta": int(grupo.meta or 0),
+        "bipes_atual": int(total_grupo)
     }
 
 
