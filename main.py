@@ -1,14 +1,18 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import Base, engine, SessionLocal
 from models import Inventario, Grupo, UsuarioAtivo, Bipe, Estoque
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 import csv
 import io
 import re
+from collections import defaultdict
+from datetime import datetime
+from urllib.parse import quote
 
 app = FastAPI(title="HS Inventário API")
 
@@ -49,12 +53,6 @@ class BipeIn(BaseModel):
     id_inventario: str
     id_grupo: str
     ean: str
-
-
-class ExcluirBipeIn(BaseModel):
-    usuario: str
-    id_inventario: str
-    id_bipe: str
 
 
 class ConcluirGrupoIn(BaseModel):
@@ -134,6 +132,140 @@ def listar_membros_grupo(db: Session, id_inventario: str, id_grupo: str):
         UsuarioAtivo.id_inventario == id_inventario,
         UsuarioAtivo.id_grupo == id_grupo
     ).all()
+
+
+def montar_label_estoque(produto: str, cor: str, tamanho: str) -> str:
+    partes = [norm_txt(produto), norm_txt(cor), norm_txt(tamanho)]
+    return " ".join([p for p in partes if p]).strip()
+
+
+def agregar_estoque_por_ean(db: Session):
+    itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+    estoque = {}
+    total_estoque = 0
+
+    for item in itens:
+        ean = normalizar_ean(item.ean)
+        if not ean:
+            continue
+
+        qtd = int(item.quantidade or 0)
+        total_estoque += qtd
+
+        if ean not in estoque:
+            estoque[ean] = {
+                "ean": ean,
+                "qtdEstoque": 0,
+                "label": montar_label_estoque(item.produto, item.cor_produ, item.tamanho),
+                "ref": norm_txt(item.produto),
+                "cor": norm_txt(item.cor_produ),
+                "grade": norm_txt(item.tamanho),
+                "tamanho": norm_txt(item.tamanho),
+                "refCor": norm_txt(item.ref_cor),
+                "filial": norm_txt(item.filial),
+            }
+
+        estoque[ean]["qtdEstoque"] += qtd
+        if not estoque[ean]["label"]:
+            estoque[ean]["label"] = montar_label_estoque(item.produto, item.cor_produ, item.tamanho)
+
+    return estoque, total_estoque
+
+
+def agregar_bipes_por_ean(db: Session, id_inventario: str):
+    query = db.query(Bipe)
+    if id_inventario:
+        query = query.filter(Bipe.id_inventario == id_inventario)
+    rows = query.all()
+
+    bipados = defaultdict(int)
+    total_consolidado = 0
+    for row in rows:
+        ean = normalizar_ean(row.ean)
+        if not ean:
+            continue
+        bipados[ean] += 1
+        total_consolidado += 1
+    return bipados, total_consolidado
+
+
+def montar_confronto_estoque(db: Session, id_inventario: str):
+    estoque, total_estoque = agregar_estoque_por_ean(db)
+    bipados, total_consolidado = agregar_bipes_por_ean(db, id_inventario)
+
+    acima = []
+    proximo = []
+    abaixo50 = []
+    exato = []
+    nao_encontrados = []
+
+    for ean, item_base in estoque.items():
+        qtd_bipada = int(bipados.get(ean, 0))
+        if qtd_bipada == 0:
+            continue
+
+        item = {
+            "ean": ean,
+            "label": item_base.get("label", ""),
+            "ref": item_base.get("ref", ""),
+            "cor": item_base.get("cor", ""),
+            "grade": item_base.get("grade", ""),
+            "tamanho": item_base.get("tamanho", ""),
+            "refCor": item_base.get("refCor", ""),
+            "filial": item_base.get("filial", ""),
+            "qtdEstoque": int(item_base.get("qtdEstoque", 0)),
+            "qtdBipada": qtd_bipada,
+        }
+
+        if qtd_bipada > item["qtdEstoque"]:
+            acima.append(item)
+        elif qtd_bipada == item["qtdEstoque"]:
+            exato.append(item)
+        else:
+            pct = 100 if item["qtdEstoque"] == 0 else round((qtd_bipada / item["qtdEstoque"]) * 100)
+            item_pct = dict(item)
+            item_pct["pct"] = int(pct)
+            if pct >= 50:
+                proximo.append(item_pct)
+            else:
+                abaixo50.append(item_pct)
+
+    for ean, qtd_bipada in bipados.items():
+        if ean in estoque:
+            continue
+        nao_encontrados.append({
+            "ean": ean,
+            "qtdBipada": int(qtd_bipada),
+            "qtdEstoque": 0,
+            "label": "",
+            "ref": "",
+            "cor": "",
+            "grade": "",
+            "tamanho": "",
+            "refCor": "",
+            "filial": "",
+        })
+
+    proximo.sort(key=lambda x: (-int(x.get("pct", 0)), str(x.get("label", ""))))
+    abaixo50.sort(key=lambda x: (-int(x.get("pct", 0)), str(x.get("label", ""))))
+    acima.sort(key=lambda x: -((int(x.get("qtdBipada", 0)) - int(x.get("qtdEstoque", 0)))))
+    exato.sort(key=lambda x: str(x.get("label", "")))
+    nao_encontrados.sort(key=lambda x: (-int(x.get("qtdBipada", 0)), str(x.get("ean", ""))))
+
+    percentual = round((total_consolidado / total_estoque) * 1000) / 10 if total_estoque > 0 else 0
+
+    return {
+        "success": True,
+        "acima": acima,
+        "proximo": proximo,
+        "abaixo50": abaixo50,
+        "exato": exato,
+        "naoEncontrados": nao_encontrados,
+        "totalEstoque": int(total_estoque),
+        "totalBipados": len(bipados),
+        "totalConsolidado": int(total_consolidado),
+        "percentualConsolidado": percentual,
+    }
 
 
 @app.get("/")
@@ -355,47 +487,6 @@ def registrar_bipe(data: BipeIn, db: Session = Depends(get_db)):
     ).count()
 
     return {"success": True, "total_grupo": total_grupo}
-
-
-@app.post("/bipes/excluir")
-def excluir_bipe(data: ExcluirBipeIn, db: Session = Depends(get_db)):
-    try:
-        bipe_id = int(str(data.id_bipe).strip())
-    except Exception:
-        raise HTTPException(status_code=400, detail="ID do bipe inválido")
-
-    bipe = db.query(Bipe).filter(
-        Bipe.id == bipe_id,
-        Bipe.id_inventario == data.id_inventario
-    ).first()
-
-    if not bipe:
-        raise HTTPException(status_code=404, detail="Bipe não encontrado")
-
-    grupo = db.query(Grupo).filter(
-        Grupo.id == bipe.id_grupo,
-        Grupo.id_inventario == data.id_inventario
-    ).first()
-
-    db.delete(bipe)
-    db.flush()
-
-    total_grupo = contar_bipes_grupo(db, data.id_inventario, bipe.id_grupo)
-    membros = listar_membros_grupo(db, data.id_inventario, bipe.id_grupo)
-
-    if grupo:
-        if grupo.status != "CONCLUIDO":
-            grupo.status = "RESERVADO" if membros else "DISPONIVEL"
-
-    db.commit()
-
-    return {
-        "success": True,
-        "id_bipe": bipe_id,
-        "id_grupo": bipe.id_grupo,
-        "grupo": bipe.grupo_nome,
-        "total_grupo": int(total_grupo or 0)
-    }
 
 
 
@@ -658,7 +749,12 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         Bipe.id_grupo == data.id_grupo
     ).delete(synchronize_session=False)
 
-    grupo.status = "RESERVADO" if membros else "DISPONIVEL"
+    db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).delete(synchronize_session=False)
+
+    grupo.status = "DISPONIVEL"
 
     db.commit()
 
@@ -667,8 +763,7 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         "grupo": grupo.nome,
         "id_grupo": grupo.id,
         "bipes_apagados": int(bipes_apagados or 0),
-        "membros_preservados": [m.usuario for m in membros],
-        "grupo_permanece_reservado": bool(membros)
+        "membros_removidos": [m.usuario for m in membros]
     }
 
 
@@ -716,7 +811,6 @@ def admin_painel(db: Session = Depends(get_db)):
         filial = item.filial if item else ""
         ref_cor = item.ref_cor if item else ""
         bipes_out.append({
-            "id": b.id,
             "usuario": b.usuario,
             "id_inventario": b.id_inventario,
             "id_grupo": b.id_grupo,
@@ -750,6 +844,109 @@ def admin_painel(db: Session = Depends(get_db)):
         "grupos": resumo_grupos,
         "bipes": bipes_out
     }
+
+
+@app.get("/estoque/confronto")
+def confrontar_estoque(id_inventario: str = "", db: Session = Depends(get_db)):
+    return montar_confronto_estoque(db, norm_txt(id_inventario))
+
+
+@app.get("/estoque/confronto/relatorio")
+def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get_db)):
+    confronto = montar_confronto_estoque(db, norm_txt(id_inventario))
+    if not confronto.get("success"):
+        raise HTTPException(status_code=400, detail=confronto.get("message") or "Falha ao gerar relatório")
+
+    wb = Workbook()
+    ws_resumo = wb.active
+    ws_resumo.title = "RESUMO"
+
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    inv = norm_txt(id_inventario) or "—"
+
+    resumo_rows = [
+        ["RELATÓRIO DE CONFRONTO DE ESTOQUE", "", "", "", "", ""],
+        ["Inventário:", inv, "Gerado em:", agora, "", ""],
+        ["", "", "", "", "", ""],
+        ["Resumo", "Valor", "", "", "", ""],
+        ["Total estoque", int(confronto["totalEstoque"]), "", "", "", ""],
+        ["Total consolidado", int(confronto["totalConsolidado"]), "", "", "", ""],
+        ["Percentual consolidado", f'{confronto["percentualConsolidado"]}%', "", "", "", ""],
+        ["EANs bipados", int(confronto["totalBipados"]), "", "", "", ""],
+        ["Acima estoque", len(confronto["acima"]), "", "", "", ""],
+        ["Próximo / faltando", len(confronto["proximo"]), "", "", "", ""],
+        ["Abaixo de 50%", len(confronto["abaixo50"]), "", "", "", ""],
+        ["Exato", len(confronto["exato"]), "", "", "", ""],
+        ["Não encontrados", len(confronto["naoEncontrados"]), "", "", "", ""],
+    ]
+    for row in resumo_rows:
+        ws_resumo.append(row)
+
+    def montar_sheet(nome, titulo, cabecalho, linhas):
+        ws = wb.create_sheet(title=nome)
+        ws.append(["RELATÓRIO DE CONFRONTO DE ESTOQUE", "", "", "", "", ""])
+        ws.append(["Inventário:", inv, "Gerado em:", agora, "", ""])
+        ws.append(["", "", "", "", "", ""])
+        ws.append([titulo, "", "", "", "", ""])
+        ws.append(cabecalho)
+        if linhas:
+            for linha in linhas:
+                ws.append(linha)
+        else:
+            ws.append(["(nenhum)", "", "", "", "", ""])
+        return ws
+
+    montar_sheet(
+        "ACIMA",
+        f"ACIMA DO ESTOQUE ({len(confronto['acima'])} itens)",
+        ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "Diferença"],
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), int(i.get("qtdBipada", 0)) - int(i.get("qtdEstoque", 0))] for i in confronto["acima"]]
+    )
+    montar_sheet(
+        "FALTANDO",
+        f"PRÓXIMO / FALTANDO ({len(confronto['proximo'])} itens)",
+        ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "% Bipado"],
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f'{i.get("pct", 0)}%'] for i in confronto["proximo"]]
+    )
+    montar_sheet(
+        "ABAIXO50",
+        f"ABAIXO DE 50% ({len(confronto['abaixo50'])} itens)",
+        ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "% Bipado"],
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f'{i.get("pct", 0)}%'] for i in confronto["abaixo50"]]
+    )
+    montar_sheet(
+        "EXATO",
+        f"EXATO ({len(confronto['exato'])} itens)",
+        ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "Diferença"],
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), 0] for i in confronto["exato"]]
+    )
+    montar_sheet(
+        "NAO_ENCONTRADOS",
+        f"NAO ENCONTRADOS NO ESTOQUE ({len(confronto['naoEncontrados'])} itens)",
+        ["EAN", "Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada"],
+        [[i.get("ean", ""), i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0))] for i in confronto["naoEncontrados"]]
+    )
+
+    for ws in wb.worksheets:
+        for col in ws.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                val = "" if cell.value is None else str(cell.value)
+                if len(val) > max_len:
+                    max_len = len(val)
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 40)
+
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    nome = f"relatorio_confronto_{inv or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(nome)}"}
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 @app.post("/estoque/importar")
