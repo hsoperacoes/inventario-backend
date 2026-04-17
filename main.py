@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, Column, Integer, String, DateTime
 from database import Base, engine, SessionLocal
 from models import Inventario, Grupo, UsuarioAtivo, Bipe, Estoque
 from openpyxl import load_workbook, Workbook
@@ -15,6 +15,12 @@ import re
 from collections import defaultdict
 from datetime import datetime
 from urllib.parse import quote
+from typing import Optional
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+from reportlab.graphics.barcode import createBarcodeDrawing
+from reportlab.graphics import renderPDF
 
 app = FastAPI(title="HS Inventário API")
 
@@ -25,6 +31,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+Base.metadata.create_all(bind=engine)
+
+class EtiquetaPendente(Base):
+    __tablename__ = "etiquetas_pendentes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ean = Column(String(32), nullable=False, index=True)
+    ref_cor = Column(String(255), nullable=False, default="")
+    grade = Column(String(64), nullable=False, default="")
+    id_inventario = Column(String(64), nullable=False, index=True)
+    id_grupo = Column(String(64), nullable=False, default="", index=True)
+    usuario = Column(String(120), nullable=False, default="")
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -55,6 +76,14 @@ class BipeIn(BaseModel):
     id_inventario: str
     id_grupo: str
     ean: str
+
+
+class ManualBipeIn(BaseModel):
+    usuario: str
+    id_inventario: str
+    id_grupo: str
+    ean: str
+    secao: Optional[str] = "MANUAL"
 
 
 class ConcluirGrupoIn(BaseModel):
@@ -134,6 +163,128 @@ def listar_membros_grupo(db: Session, id_inventario: str, id_grupo: str):
         UsuarioAtivo.id_inventario == id_inventario,
         UsuarioAtivo.id_grupo == id_grupo
     ).all()
+
+
+
+
+def buscar_item_estoque_por_ean(db: Session, ean: str):
+    ean_norm = normalizar_ean(ean)
+    if not ean_norm:
+        return None
+
+    candidatos = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+    for item in candidatos:
+        if normalizar_ean(getattr(item, "ean", "")) == ean_norm:
+            return item
+    return None
+
+
+def registrar_etiqueta_manual(db: Session, *, ean: str, id_inventario: str, id_grupo: str, usuario: str):
+    item = buscar_item_estoque_por_ean(db, ean)
+    if not item:
+        return None
+
+    ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(getattr(item, "produto", ""), getattr(item, "cor_produ", ""))
+    grade = norm_txt(getattr(item, "tamanho", ""))
+
+    etiqueta = EtiquetaPendente(
+        ean=normalizar_ean(ean),
+        ref_cor=ref_cor,
+        grade=grade,
+        id_inventario=norm_txt(id_inventario),
+        id_grupo=norm_txt(id_grupo),
+        usuario=norm_txt(usuario),
+    )
+    db.add(etiqueta)
+    db.commit()
+    db.refresh(etiqueta)
+    return etiqueta
+
+
+def listar_etiquetas_pendentes(db: Session, id_inventario: str = ""):
+    query = db.query(EtiquetaPendente).order_by(EtiquetaPendente.id.asc())
+    if norm_txt(id_inventario):
+        query = query.filter(EtiquetaPendente.id_inventario == norm_txt(id_inventario))
+    rows = query.all()
+    return [
+        {
+            "id": row.id,
+            "ean": norm_txt(row.ean),
+            "refCor": norm_txt(row.ref_cor),
+            "grade": norm_txt(row.grade),
+            "data": row.criado_em.isoformat() if row.criado_em else "",
+            "idInventario": norm_txt(row.id_inventario),
+            "idGrupo": norm_txt(row.id_grupo),
+            "usuario": norm_txt(row.usuario),
+        }
+        for row in rows
+    ]
+
+
+def gerar_pdf_etiquetas_bytes(etiquetas):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    page_w, page_h = A4
+
+    cols = 4
+    rows = 4
+    margin_x = 8 * mm
+    margin_y = 8 * mm
+    gap_x = 4 * mm
+    gap_y = 4 * mm
+    label_w = (page_w - (2 * margin_x) - ((cols - 1) * gap_x)) / cols
+    label_h = (page_h - (2 * margin_y) - ((rows - 1) * gap_y)) / rows
+
+    def draw_label(x, y, e):
+        c.setLineWidth(0.8)
+        c.rect(x, y, label_w, label_h)
+
+        grade_w = 14 * mm
+        grade_h = 14 * mm
+        c.rect(x + 3 * mm, y + label_h - grade_h - 3 * mm, grade_w, grade_h)
+        c.setFont('Helvetica-Bold', 10)
+        c.drawCentredString(x + 3 * mm + grade_w / 2, y + label_h - 10 * mm, norm_txt(e.get('grade')) or '?')
+
+        ref_cor = norm_txt(e.get('refCor')) or '—'
+        c.setFont('Helvetica-Bold', 6.8)
+        text = c.beginText(x + 3 * mm + grade_w + 3 * mm, y + label_h - 7 * mm)
+        max_chars = 18
+        for part in [ref_cor[i:i+max_chars] for i in range(0, min(len(ref_cor), max_chars*2), max_chars)]:
+            text.textLine(part)
+        c.drawText(text)
+
+        ean = normalizar_ean(e.get('ean'))
+        if len(ean) == 13:
+            try:
+                barcode = createBarcodeDrawing('EAN13', value=ean, humanReadable=False, barHeight=12*mm, width=label_w-10*mm)
+                renderPDF.draw(barcode, c, x + 5*mm, y + 16*mm)
+            except Exception:
+                c.setFont('Helvetica', 8)
+                c.drawString(x + 5*mm, y + 24*mm, ean)
+        else:
+            c.setFont('Helvetica', 8)
+            c.drawString(x + 5*mm, y + 24*mm, ean)
+
+        c.setFont('Helvetica', 7.5)
+        c.drawCentredString(x + label_w/2, y + 8*mm, ean)
+
+    for idx, e in enumerate(etiquetas):
+        page_pos = idx % (cols * rows)
+        col = page_pos % cols
+        row = page_pos // cols
+        x = margin_x + col * (label_w + gap_x)
+        y = page_h - margin_y - (row + 1) * label_h - row * gap_y
+        draw_label(x, y, e)
+        if page_pos == (cols * rows) - 1 and idx != len(etiquetas) - 1:
+            c.showPage()
+
+    if not etiquetas:
+        c.setFont('Helvetica', 12)
+        c.drawString(20 * mm, page_h - 20 * mm, 'Nenhuma etiqueta pendente.')
+
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def montar_label_estoque(produto: str, cor: str, tamanho: str) -> str:
@@ -448,6 +599,56 @@ def usuario_ativo(usuario: str, id_inventario: str, db: Session = Depends(get_db
         "colaborativo": grupo.colaborativo,
         "bipes": total,
         "membros": [m.usuario for m in membros]
+    }
+
+
+@app.post("/bipes/manual")
+def registrar_bipe_manual(data: ManualBipeIn, db: Session = Depends(get_db)):
+    grupo = db.query(Grupo).filter(
+        Grupo.id == data.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    usuario_ok = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.usuario == data.usuario,
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).first()
+
+    if not usuario_ok:
+        raise HTTPException(status_code=400, detail="Usuário não está ativo nesse grupo")
+
+    registro = Bipe(
+        usuario=data.usuario,
+        id_inventario=data.id_inventario,
+        id_grupo=data.id_grupo,
+        grupo_nome=usuario_ok.grupo_nome,
+        ean=normalizar_ean(data.ean)
+    )
+    db.add(registro)
+    db.commit()
+    db.refresh(registro)
+
+    etiqueta = registrar_etiqueta_manual(
+        db,
+        ean=data.ean,
+        id_inventario=data.id_inventario,
+        id_grupo=data.id_grupo,
+        usuario=data.usuario,
+    )
+
+    total_grupo = db.query(Bipe).filter(
+        Bipe.id_inventario == data.id_inventario,
+        Bipe.id_grupo == data.id_grupo
+    ).count()
+
+    return {
+        "success": True,
+        "total_grupo": total_grupo,
+        "etiqueta_gerada": bool(etiqueta),
     }
 
 
