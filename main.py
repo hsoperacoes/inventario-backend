@@ -130,6 +130,32 @@ def listar_membros_grupo(db: Session, id_inventario: str, id_grupo: str):
     ).all()
 
 
+def montar_bipe_admin_dict(b: Bipe, db: Session):
+    ean_norm = normalizar_ean(b.ean)
+    item = None
+    if ean_norm:
+        item = db.query(Estoque).filter(
+            Estoque.ean == ean_norm,
+            Estoque.ativo.is_(True)
+        ).first()
+
+    return {
+        "usuario": b.usuario,
+        "id_inventario": b.id_inventario,
+        "id_grupo": b.id_grupo,
+        "grupo_nome": b.grupo_nome,
+        "ean": b.ean,
+        "hora": str(b.criado_em),
+        "label_compact": (f"{item.produto}{item.cor_produ} {item.grade}".strip() if item else ""),
+        "ref": (item.produto if item else ""),
+        "cor": (item.cor_produ if item else ""),
+        "tamanho": (item.tamanho if item else ""),
+        "grade": (item.grade if item else ""),
+        "filial": (item.filial if item else ""),
+        "nao_encontrado": item is None
+    }
+
+
 @app.get("/")
 def home():
     return {"status": "API rodando com banco"}
@@ -675,16 +701,7 @@ def admin_painel(db: Session = Depends(get_db)):
             } for u in usuarios
         ],
         "grupos": resumo_grupos,
-        "bipes": [
-            {
-                "usuario": b.usuario,
-                "id_inventario": b.id_inventario,
-                "id_grupo": b.id_grupo,
-                "grupo_nome": b.grupo_nome,
-                "ean": b.ean,
-                "hora": str(b.criado_em)
-            } for b in bipes
-        ]
+        "bipes": [montar_bipe_admin_dict(b, db) for b in bipes]
     }
 
 
@@ -823,6 +840,34 @@ def validar_estoque(ean: str, db: Session = Depends(get_db)):
             "labelCompact": f"{item.produto}{item.cor_produ} {item.grade}".strip(),
             "refCor": item.ref_cor
         }
+    }
+
+
+@app.get("/estoque/info")
+def estoque_info(ean: str, db: Session = Depends(get_db)):
+    ean_norm = normalizar_ean(ean)
+    if not ean_norm:
+        return {"success": True, "encontrado": False}
+
+    item = db.query(Estoque).filter(
+        Estoque.ean == ean_norm,
+        Estoque.ativo.is_(True)
+    ).first()
+
+    if not item:
+        return {"success": True, "encontrado": False, "ean": ean_norm}
+
+    return {
+        "success": True,
+        "encontrado": True,
+        "ean": item.ean,
+        "label_compact": f"{item.produto}{item.cor_produ} {item.grade}".strip(),
+        "ref": item.produto,
+        "cor": item.cor_produ,
+        "tamanho": item.tamanho,
+        "grade": item.grade,
+        "filial": item.filial,
+        "refCor": item.ref_cor
     }
 
 
