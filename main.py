@@ -51,6 +51,12 @@ class BipeIn(BaseModel):
     ean: str
 
 
+class ExcluirBipeIn(BaseModel):
+    usuario: str
+    id_inventario: str
+    id_bipe: str
+
+
 class ConcluirGrupoIn(BaseModel):
     usuario: str
     id_inventario: str
@@ -351,6 +357,47 @@ def registrar_bipe(data: BipeIn, db: Session = Depends(get_db)):
     return {"success": True, "total_grupo": total_grupo}
 
 
+@app.post("/bipes/excluir")
+def excluir_bipe(data: ExcluirBipeIn, db: Session = Depends(get_db)):
+    try:
+        bipe_id = int(str(data.id_bipe).strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID do bipe inválido")
+
+    bipe = db.query(Bipe).filter(
+        Bipe.id == bipe_id,
+        Bipe.id_inventario == data.id_inventario
+    ).first()
+
+    if not bipe:
+        raise HTTPException(status_code=404, detail="Bipe não encontrado")
+
+    grupo = db.query(Grupo).filter(
+        Grupo.id == bipe.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    db.delete(bipe)
+    db.flush()
+
+    total_grupo = contar_bipes_grupo(db, data.id_inventario, bipe.id_grupo)
+    membros = listar_membros_grupo(db, data.id_inventario, bipe.id_grupo)
+
+    if grupo:
+        if grupo.status != "CONCLUIDO":
+            grupo.status = "RESERVADO" if membros else "DISPONIVEL"
+
+    db.commit()
+
+    return {
+        "success": True,
+        "id_bipe": bipe_id,
+        "id_grupo": bipe.id_grupo,
+        "grupo": bipe.grupo_nome,
+        "total_grupo": int(total_grupo or 0)
+    }
+
+
 
 @app.post("/grupos/concluir")
 def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
@@ -611,12 +658,7 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         Bipe.id_grupo == data.id_grupo
     ).delete(synchronize_session=False)
 
-    db.query(UsuarioAtivo).filter(
-        UsuarioAtivo.id_inventario == data.id_inventario,
-        UsuarioAtivo.id_grupo == data.id_grupo
-    ).delete(synchronize_session=False)
-
-    grupo.status = "DISPONIVEL"
+    grupo.status = "RESERVADO" if membros else "DISPONIVEL"
 
     db.commit()
 
@@ -625,7 +667,8 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         "grupo": grupo.nome,
         "id_grupo": grupo.id,
         "bipes_apagados": int(bipes_apagados or 0),
-        "membros_removidos": [m.usuario for m in membros]
+        "membros_preservados": [m.usuario for m in membros],
+        "grupo_permanece_reservado": bool(membros)
     }
 
 
@@ -673,6 +716,7 @@ def admin_painel(db: Session = Depends(get_db)):
         filial = item.filial if item else ""
         ref_cor = item.ref_cor if item else ""
         bipes_out.append({
+            "id": b.id,
             "usuario": b.usuario,
             "id_inventario": b.id_inventario,
             "id_grupo": b.id_grupo,
