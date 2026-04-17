@@ -504,6 +504,35 @@ def estoque_mapa_mini(db: Session = Depends(get_db)):
         "geradoEm": datetime.utcnow().isoformat()
     }
 
+@app.get("/etiquetas")
+def get_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
+    return {"success": True, "etiquetas": listar_etiquetas_pendentes(db, norm_txt(id_inventario))}
+
+
+@app.delete("/etiquetas")
+def delete_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
+    query = db.query(EtiquetaPendente)
+    if norm_txt(id_inventario):
+        query = query.filter(EtiquetaPendente.id_inventario == norm_txt(id_inventario))
+    removidas = query.delete(synchronize_session=False)
+    db.commit()
+    return {"success": True, "removidas": int(removidas or 0)}
+
+
+@app.get("/etiquetas/pdf")
+def pdf_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
+    etiquetas = listar_etiquetas_pendentes(db, norm_txt(id_inventario))
+    conteudo = gerar_pdf_etiquetas_bytes(etiquetas)
+    nome_base = f"etiquetas_{norm_txt(id_inventario) or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.pdf"
+    nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{nome_seguro}\"; filename*=UTF-8''{quote(nome_base)}",
+        "Access-Control-Expose-Headers": "Content-Disposition",
+        "Cache-Control": "no-store"
+    }
+    return Response(content=conteudo, media_type="application/pdf", headers=headers)
+
+
 @app.get("/")
 def home():
     return {"status": "API rodando com banco"}
@@ -1113,6 +1142,8 @@ def admin_painel(db: Session = Depends(get_db)):
             "nao_encontrado": item is None
         })
 
+    confronto_global = montar_confronto_estoque(db, "")
+
     return {
         "success": True,
         "inventarios": [
@@ -1128,7 +1159,10 @@ def admin_painel(db: Session = Depends(get_db)):
             } for u in usuarios
         ],
         "grupos": resumo_grupos,
-        "bipes": bipes_out
+        "bipes": bipes_out,
+        "totalEstoque": int(confronto_global.get("totalEstoque", 0) or 0),
+        "totalConsolidado": int(confronto_global.get("totalConsolidado", len(bipes_out)) or 0),
+        "percentualConsolidado": float(confronto_global.get("percentualConsolidado", 0) or 0)
     }
 
 
