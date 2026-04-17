@@ -130,32 +130,6 @@ def listar_membros_grupo(db: Session, id_inventario: str, id_grupo: str):
     ).all()
 
 
-def montar_bipe_admin_dict(b: Bipe, db: Session):
-    ean_norm = normalizar_ean(b.ean)
-    item = None
-    if ean_norm:
-        item = db.query(Estoque).filter(
-            Estoque.ean == ean_norm,
-            Estoque.ativo.is_(True)
-        ).first()
-
-    return {
-        "usuario": b.usuario,
-        "id_inventario": b.id_inventario,
-        "id_grupo": b.id_grupo,
-        "grupo_nome": b.grupo_nome,
-        "ean": b.ean,
-        "hora": str(b.criado_em),
-        "label_compact": (f"{item.produto}{item.cor_produ} {item.grade}".strip() if item else ""),
-        "ref": (item.produto if item else ""),
-        "cor": (item.cor_produ if item else ""),
-        "tamanho": (item.tamanho if item else ""),
-        "grade": (item.grade if item else ""),
-        "filial": (item.filial if item else ""),
-        "nao_encontrado": item is None
-    }
-
-
 @app.get("/")
 def home():
     return {"status": "API rodando com banco"}
@@ -662,6 +636,9 @@ def admin_painel(db: Session = Depends(get_db)):
     usuarios = db.query(UsuarioAtivo).all()
     grupos = db.query(Grupo).all()
     bipes = db.query(Bipe).all()
+    itens_estoque = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+
+    estoque_por_ean = {str(item.ean or ""): item for item in itens_estoque}
 
     resumo_grupos = []
     for g in grupos:
@@ -686,6 +663,32 @@ def admin_painel(db: Session = Depends(get_db)):
             "bipes": total
         })
 
+    bipes_out = []
+    for b in bipes:
+        item = estoque_por_ean.get(str(b.ean or ""))
+        ref = item.produto if item else ""
+        cor = item.cor_produ if item else ""
+        tamanho = item.tamanho if item else ""
+        grade = item.grade if item else ""
+        filial = item.filial if item else ""
+        ref_cor = item.ref_cor if item else ""
+        bipes_out.append({
+            "usuario": b.usuario,
+            "id_inventario": b.id_inventario,
+            "id_grupo": b.id_grupo,
+            "grupo_nome": b.grupo_nome,
+            "ean": b.ean,
+            "hora": str(b.criado_em),
+            "label_compact": f"{ref_cor} {tamanho}".strip() if item else "",
+            "ref": ref,
+            "cor": cor,
+            "tamanho": tamanho,
+            "grade": grade,
+            "filial": filial,
+            "ref_cor": ref_cor,
+            "nao_encontrado": item is None
+        })
+
     return {
         "success": True,
         "inventarios": [
@@ -701,7 +704,7 @@ def admin_painel(db: Session = Depends(get_db)):
             } for u in usuarios
         ],
         "grupos": resumo_grupos,
-        "bipes": [montar_bipe_admin_dict(b, db) for b in bipes]
+        "bipes": bipes_out
     }
 
 
@@ -836,38 +839,10 @@ def validar_estoque(ean: str, db: Session = Depends(get_db)):
             "tamanho": item.tamanho,
             "filial": item.filial,
             "qtdEstoque": item.quantidade,
-            "label": f"{item.produto}{item.cor_produ} {item.grade}".strip(),
-            "labelCompact": f"{item.produto}{item.cor_produ} {item.grade}".strip(),
+            "label": f"{item.ref_cor} {item.tamanho}".strip(),
+            "labelCompact": f"{item.ref_cor} {item.tamanho}".strip(),
             "refCor": item.ref_cor
         }
-    }
-
-
-@app.get("/estoque/info")
-def estoque_info(ean: str, db: Session = Depends(get_db)):
-    ean_norm = normalizar_ean(ean)
-    if not ean_norm:
-        return {"success": True, "encontrado": False}
-
-    item = db.query(Estoque).filter(
-        Estoque.ean == ean_norm,
-        Estoque.ativo.is_(True)
-    ).first()
-
-    if not item:
-        return {"success": True, "encontrado": False, "ean": ean_norm}
-
-    return {
-        "success": True,
-        "encontrado": True,
-        "ean": item.ean,
-        "label_compact": f"{item.produto}{item.cor_produ} {item.grade}".strip(),
-        "ref": item.produto,
-        "cor": item.cor_produ,
-        "tamanho": item.tamanho,
-        "grade": item.grade,
-        "filial": item.filial,
-        "refCor": item.ref_cor
     }
 
 
@@ -876,7 +851,7 @@ def estoque_mapa_mini(db: Session = Depends(get_db)):
     itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
     mapa = {}
     for item in itens:
-        mapa[item.ean] = f"{item.produto}{item.cor_produ} {item.grade}".strip()
+        mapa[item.ean] = f"{item.ref_cor} {item.tamanho}".strip()
 
     return {
         "success": True,
