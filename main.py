@@ -57,6 +57,12 @@ class ConcluirGrupoIn(BaseModel):
     id_grupo: str
 
 
+class ResetarGrupoIn(BaseModel):
+    usuario: str
+    id_inventario: str
+    id_grupo: str
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -78,6 +84,13 @@ def norm_txt(valor):
 
 def montar_ref_cor(produto, cor):
     return f"{norm_txt(produto)}{norm_txt(cor)}".strip()
+
+
+def obter_grupo_ativo_do_usuario(db: Session, usuario: str, id_inventario: str):
+    return db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.usuario == usuario,
+        UsuarioAtivo.id_inventario == id_inventario
+    ).first()
 
 
 @app.get("/")
@@ -311,10 +324,24 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
     if not grupo:
         raise HTTPException(status_code=404, detail="Grupo não encontrado")
 
-    total_grupo = db.query(Bipe).filter(
+    usuario_ativo = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.usuario == data.usuario,
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).first()
+
+    if not usuario_ativo:
+        raise HTTPException(status_code=400, detail="Usuário não está ativo nesse grupo")
+
+    total_grupo = db.query(func.count(Bipe.id)).filter(
         Bipe.id_inventario == data.id_inventario,
         Bipe.id_grupo == data.id_grupo
-    ).count()
+    ).scalar() or 0
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).all()
 
     grupo.status = "CONCLUIDO"
 
@@ -327,11 +354,59 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
 
     return {
         "success": True,
-        "count": total_grupo
+        "grupo": grupo.nome,
+        "id_grupo": grupo.id,
+        "count": total_grupo,
+        "membros_removidos": [m.usuario for m in membros]
+    }
+
+
+@app.post("/grupos/resetar")
+def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
+    grupo = db.query(Grupo).filter(
+        Grupo.id == data.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    usuario_no_inventario = obter_grupo_ativo_do_usuario(db, data.usuario, data.id_inventario)
+    if not usuario_no_inventario:
+        inventario = db.get(Inventario, data.id_inventario)
+        if inventario is None:
+            raise HTTPException(status_code=404, detail="Inventário não encontrado")
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).all()
+
+    bipes_apagados = db.query(Bipe).filter(
+        Bipe.id_inventario == data.id_inventario,
+        Bipe.id_grupo == data.id_grupo
+    ).delete(synchronize_session=False)
+
+    db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).delete(synchronize_session=False)
+
+    grupo.status = "DISPONIVEL"
+
+    db.commit()
+
+    return {
+        "success": True,
+        "grupo": grupo.nome,
+        "id_grupo": grupo.id,
+        "bipes_apagados": int(bipes_apagados or 0),
+        "membros_removidos": [m.usuario for m in membros]
     }
 
 
 @app.get("/admin/painel")
+
 def admin_painel(db: Session = Depends(get_db)):
     inventarios = db.query(Inventario).all()
     usuarios = db.query(UsuarioAtivo).all()
