@@ -7,6 +7,7 @@ from sqlalchemy import func
 from database import Base, engine, SessionLocal
 from models import Inventario, Grupo, UsuarioAtivo, Bipe, Estoque
 from openpyxl import load_workbook, Workbook
+from openpyxl.utils import get_column_letter
 import csv
 import io
 import re
