@@ -858,244 +858,74 @@ def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get
         raise HTTPException(status_code=400, detail=confronto.get("message") or "Falha ao gerar relatório")
 
     wb = Workbook()
-    ws_resumo = wb.active
-    ws_resumo.title = "RESUMO"
-
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
     inv = norm_txt(id_inventario) or "—"
 
-    resumo_rows = [
-        ["RELATÓRIO DE CONFRONTO DE ESTOQUE", "", "", "", "", ""],
-        ["Inventário:", inv, "Gerado em:", agora, "", ""],
-        ["", "", "", "", "", ""],
-        ["Resumo", "Valor", "", "", "", ""],
-        ["Total estoque", int(confronto["totalEstoque"]), "", "", "", ""],
-        ["Total consolidado", int(confronto["totalConsolidado"]), "", "", "", ""],
-        ["Percentual consolidado", f'{confronto["percentualConsolidado"]}%', "", "", "", ""],
-        ["EANs bipados", int(confronto["totalBipados"]), "", "", "", ""],
-        ["Acima estoque", len(confronto["acima"]), "", "", "", ""],
-        ["Próximo / faltando", len(confronto["proximo"]), "", "", "", ""],
-        ["Abaixo de 50%", len(confronto["abaixo50"]), "", "", "", ""],
-        ["Exato", len(confronto["exato"]), "", "", "", ""],
-        ["Não encontrados", len(confronto["naoEncontrados"]), "", "", "", ""],
-    ]
-    for row in resumo_rows:
-        ws_resumo.append(row)
-
-    def montar_sheet(nome, titulo, cabecalho, linhas):
-        ws = wb.create_sheet(title=nome)
-        ws.append(["RELATÓRIO DE CONFRONTO DE ESTOQUE", "", "", "", "", ""])
-        ws.append(["Inventário:", inv, "Gerado em:", agora, "", ""])
-        ws.append(["", "", "", "", "", ""])
-        ws.append([titulo, "", "", "", "", ""])
-        ws.append(cabecalho)
+    def montar_sheet(ws, titulo, cabecalho, linhas):
+        bloco = []
+        bloco.append(["RELATÓRIO DE CONFRONTO DE ESTOQUE", "", "", "", "", ""])
+        bloco.append(["Inventário:", inv, "Gerado em:", agora, "", ""])
+        bloco.append(["", "", "", "", "", ""])
+        bloco.append([titulo, "", "", "", "", ""])
+        bloco.append(cabecalho)
         if linhas:
-            for linha in linhas:
-                ws.append(linha)
+            bloco.extend(linhas)
         else:
-            ws.append(["(nenhum)", "", "", "", "", ""])
-        return ws
+            bloco.append(["(nenhum)", "", "", "", "", ""])
+        for row in bloco:
+            ws.append(row)
+        ws["A1"].font = Font(bold=True, size=12)
+        for col in range(1, 7):
+            ws.column_dimensions[get_column_letter(col)].width = 18
 
+    ws_acima = wb.active
+    ws_acima.title = "ACIMA"
     montar_sheet(
-        "ACIMA",
+        ws_acima,
         f"ACIMA DO ESTOQUE ({len(confronto['acima'])} itens)",
         ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "Diferença"],
         [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), int(i.get("qtdBipada", 0)) - int(i.get("qtdEstoque", 0))] for i in confronto["acima"]]
     )
+
+    ws_faltando = wb.create_sheet(title="FALTANDO")
     montar_sheet(
-        "FALTANDO",
+        ws_faltando,
         f"PRÓXIMO / FALTANDO ({len(confronto['proximo'])} itens)",
         ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "% Bipado"],
-        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f'{i.get("pct", 0)}%'] for i in confronto["proximo"]]
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f"{i.get('pct', 0)}%"] for i in confronto["proximo"]]
     )
+
+    ws_abaixo50 = wb.create_sheet(title="ABAIXO50")
     montar_sheet(
-        "ABAIXO50",
+        ws_abaixo50,
         f"ABAIXO DE 50% ({len(confronto['abaixo50'])} itens)",
         ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "% Bipado"],
-        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f'{i.get("pct", 0)}%'] for i in confronto["abaixo50"]]
+        [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), f"{i.get('pct', 0)}%"] for i in confronto["abaixo50"]]
     )
+
+    ws_exato = wb.create_sheet(title="EXATO")
     montar_sheet(
-        "EXATO",
+        ws_exato,
         f"EXATO ({len(confronto['exato'])} itens)",
         ["Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada", "Diferença"],
         [[i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0)), 0] for i in confronto["exato"]]
     )
+
+    ws_ne = wb.create_sheet(title="NAO_ENCONTRADOS")
     montar_sheet(
-        "NAO_ENCONTRADOS",
+        ws_ne,
         f"NAO ENCONTRADOS NO ESTOQUE ({len(confronto['naoEncontrados'])} itens)",
         ["EAN", "Referência", "Cor", "Tamanho", "Qtd Estoque", "Qtd Bipada"],
         [[i.get("ean", ""), i.get("ref", ""), i.get("cor", ""), i.get("grade", ""), int(i.get("qtdEstoque", 0)), int(i.get("qtdBipada", 0))] for i in confronto["naoEncontrados"]]
     )
 
-    for ws in wb.worksheets:
-        for col in ws.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = "" if cell.value is None else str(cell.value)
-                if len(val) > max_len:
-                    max_len = len(val)
-            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 40)
-
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
     nome = f"relatorio_confronto_{inv or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(nome)}"}
+    headers = {"Content-Disposition": f'attachment; filename="{nome}"'}
     return StreamingResponse(
-        stream,
+        buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
-
-
-@app.post("/estoque/importar")
-async def importar_estoque(
-    arquivo: UploadFile = File(...),
-    substituir_tudo: bool = Query(True),
-    db: Session = Depends(get_db)
-):
-    nome = (arquivo.filename or "").lower()
-
-    if not (nome.endswith(".xlsx") or nome.endswith(".csv")):
-        raise HTTPException(status_code=400, detail="Envie um arquivo .xlsx ou .csv")
-
-    linhas = []
-
-    if nome.endswith(".xlsx"):
-        conteudo = await arquivo.read()
-        wb = load_workbook(io.BytesIO(conteudo), data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            raise HTTPException(status_code=400, detail="Arquivo vazio")
-
-        cab = [norm_txt(c) for c in rows[0]]
-
-        for row in rows[1:]:
-            item = dict(zip(cab, row))
-            linhas.append(item)
-
-    elif nome.endswith(".csv"):
-        conteudo = await arquivo.read()
-        texto = conteudo.decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(texto))
-        for row in reader:
-            linhas.append(row)
-
-    obrigatorias = ["PRODUTO", "COR_PRODU", "FILIAL", "TAMANHO", "QUANTIDADE", "GRADE", "CODIGO_BARR"]
-    if not linhas:
-        raise HTTPException(status_code=400, detail="Nenhuma linha encontrada no arquivo")
-
-    primeira = linhas[0]
-    faltando = [c for c in obrigatorias if c not in primeira]
-    if faltando:
-        raise HTTPException(status_code=400, detail=f"Colunas ausentes: {', '.join(faltando)}")
-
-    if substituir_tudo:
-        db.query(Estoque).delete()
-        db.commit()
-
-    inseridos = 0
-    ignorados = 0
-
-    for item in linhas:
-        produto = norm_txt(item.get("PRODUTO"))
-        cor_produ = norm_txt(item.get("COR_PRODU"))
-        filial = norm_txt(item.get("FILIAL"))
-        tamanho = norm_txt(item.get("TAMANHO"))
-        grade = norm_txt(item.get("GRADE"))
-        ean = normalizar_ean(item.get("CODIGO_BARR"))
-        ref_cor = montar_ref_cor(produto, cor_produ)
-
-        try:
-            quantidade = int(float(str(item.get("QUANTIDADE") or "0").replace(",", ".")))
-        except Exception:
-            quantidade = 0
-
-        if not ean:
-            ignorados += 1
-            continue
-
-        existente = db.query(Estoque).filter(Estoque.ean == ean).first()
-        if existente:
-            existente.produto = produto
-            existente.cor_produ = cor_produ
-            existente.filial = filial
-            existente.tamanho = tamanho
-            existente.quantidade = quantidade
-            existente.grade = grade
-            existente.ref_cor = ref_cor
-            existente.ativo = True
-        else:
-            novo = Estoque(
-                produto=produto,
-                cor_produ=cor_produ,
-                filial=filial,
-                tamanho=tamanho,
-                quantidade=quantidade,
-                grade=grade,
-                ean=ean,
-                ref_cor=ref_cor,
-                ativo=True
-            )
-            db.add(novo)
-
-        inseridos += 1
-
-    db.commit()
-
-    total = db.query(Estoque).count()
-
-    return {
-        "success": True,
-        "inseridos": inseridos,
-        "ignorados": ignorados,
-        "total_estoque": total
-    }
-
-
-@app.get("/estoque/validar")
-def validar_estoque(ean: str, db: Session = Depends(get_db)):
-    ean_norm = normalizar_ean(ean)
-    if not ean_norm:
-        return {"success": True, "encontrado": False}
-
-    item = db.query(Estoque).filter(
-        Estoque.ean == ean_norm,
-        Estoque.ativo.is_(True)
-    ).first()
-
-    if not item:
-        return {"success": True, "encontrado": False, "ean": ean_norm}
-
-    return {
-        "success": True,
-        "encontrado": True,
-        "ean": item.ean,
-        "info": {
-            "ref": item.produto,
-            "cor": item.cor_produ,
-            "grade": item.grade,
-            "tamanho": item.tamanho,
-            "filial": item.filial,
-            "qtdEstoque": item.quantidade,
-            "label": f"{item.ref_cor} {item.tamanho}".strip(),
-            "labelCompact": f"{item.ref_cor} {item.tamanho}".strip(),
-            "refCor": item.ref_cor
-        }
-    }
-
-
-@app.get("/estoque/mapa-mini")
-def estoque_mapa_mini(db: Session = Depends(get_db)):
-    itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
-    mapa = {}
-    for item in itens:
-        mapa[item.ean] = f"{item.ref_cor} {item.tamanho}".strip()
-
-    return {
-        "success": True,
-        "total": len(mapa),
-        "mapa": mapa
-    }
