@@ -8,6 +8,7 @@ from database import Base, engine, SessionLocal
 from models import Inventario, Grupo, UsuarioAtivo, Bipe, Estoque
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 import csv
 import io
 import re
