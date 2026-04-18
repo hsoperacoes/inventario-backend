@@ -158,6 +158,10 @@ class RemoverDoGrupoIn(BaseModel):
     id_inventario: str
 
 
+class ConsolidadoUpdateIn(BaseModel):
+    ean: Optional[str] = None
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -368,10 +372,15 @@ def agregar_estoque_por_ean(db: Session):
 
 
 def agregar_bipes_por_ean(db: Session, id_inventario: str):
+    grupos_query = db.query(Grupo).filter(Grupo.status == "CONCLUIDO")
+    if id_inventario:
+        grupos_query = grupos_query.filter(Grupo.id_inventario == id_inventario)
+    grupos_concluidos_ids = {str(g.id) for g in grupos_query.all()}
+
     query = db.query(Bipe)
     if id_inventario:
         query = query.filter(Bipe.id_inventario == id_inventario)
-    rows = query.all()
+    rows = [row for row in query.all() if str(row.id_grupo) in grupos_concluidos_ids]
 
     bipados = defaultdict(int)
     total_consolidado = 0
@@ -382,6 +391,46 @@ def agregar_bipes_por_ean(db: Session, id_inventario: str):
         bipados[ean] += 1
         total_consolidado += 1
     return bipados, total_consolidado
+
+
+def listar_consolidado_rows(db: Session, id_inventario: str = ""):
+    grupos_query = db.query(Grupo).filter(Grupo.status == "CONCLUIDO")
+    if id_inventario:
+        grupos_query = grupos_query.filter(Grupo.id_inventario == id_inventario)
+    grupos = grupos_query.all()
+    grupos_map = {str(g.id): g for g in grupos}
+    grupos_ids = set(grupos_map.keys())
+
+    query = db.query(Bipe)
+    if id_inventario:
+        query = query.filter(Bipe.id_inventario == id_inventario)
+
+    itens_estoque = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+    estoque_por_ean = {normalizar_ean(getattr(item, "ean", "")): item for item in itens_estoque}
+
+    rows = []
+    for b in query.all():
+        if str(b.id_grupo) not in grupos_ids:
+            continue
+        item = estoque_por_ean.get(normalizar_ean(getattr(b, "ean", "")))
+        rows.append({
+            "id": int(b.id),
+            "idInventario": norm_txt(b.id_inventario),
+            "idGrupo": norm_txt(b.id_grupo),
+            "grupo": norm_txt(b.grupo_nome) or norm_txt(getattr(grupos_map.get(str(b.id_grupo)), "nome", "")),
+            "usuario": norm_txt(b.usuario),
+            "ean": normalizar_ean(getattr(b, "ean", "")),
+            "hora": b.criado_em.isoformat() if getattr(b, "criado_em", None) else "",
+            "ref": norm_txt(getattr(item, "produto", "")) if item else "",
+            "cor": norm_txt(getattr(item, "cor_produ", "")) if item else "",
+            "tamanho": norm_txt(getattr(item, "tamanho", "")) if item else "",
+            "grade": norm_txt(getattr(item, "grade", "")) if item else "",
+            "refCor": norm_txt(getattr(item, "ref_cor", "")) if item else "",
+            "filial": norm_txt(getattr(item, "filial", "")) if item else "",
+            "naoEncontrado": item is None,
+        })
+    rows.sort(key=lambda x: (x["idInventario"], x["grupo"], x["usuario"], x["id"]))
+    return rows
 
 
 def montar_confronto_estoque(db: Session, id_inventario: str):
@@ -1179,6 +1228,53 @@ def admin_painel(db: Session = Depends(get_db)):
     }
 
 
+
+
+@app.get("/consolidado")
+def get_consolidado(id_inventario: str = "", request: Request = None, db: Session = Depends(get_db)):
+    if request is not None:
+        require_admin(request)
+    rows = listar_consolidado_rows(db, norm_txt(id_inventario))
+    return {"success": True, "itens": rows, "total": len(rows)}
+
+
+@app.delete("/consolidado/{bipe_id}")
+def excluir_consolidado(bipe_id: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    bipe = db.query(Bipe).filter(Bipe.id == bipe_id).first()
+    if not bipe:
+        raise HTTPException(status_code=404, detail="Linha consolidada não encontrada")
+
+    grupo = db.query(Grupo).filter(Grupo.id == bipe.id_grupo).first()
+    if not grupo or norm_txt(grupo.status) != "CONCLUIDO":
+        raise HTTPException(status_code=400, detail="A linha informada não pertence ao consolidado fechado")
+
+    db.delete(bipe)
+    db.commit()
+    total = len(listar_consolidado_rows(db, norm_txt(bipe.id_inventario)))
+    return {"success": True, "id": bipe_id, "total": total}
+
+
+@app.patch("/consolidado/{bipe_id}")
+def editar_consolidado(bipe_id: int, data: ConsolidadoUpdateIn, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    bipe = db.query(Bipe).filter(Bipe.id == bipe_id).first()
+    if not bipe:
+        raise HTTPException(status_code=404, detail="Linha consolidada não encontrada")
+    grupo = db.query(Grupo).filter(Grupo.id == bipe.id_grupo).first()
+    if not grupo or norm_txt(grupo.status) != "CONCLUIDO":
+        raise HTTPException(status_code=400, detail="A linha informada não pertence ao consolidado fechado")
+
+    if data.ean is not None:
+        novo_ean = normalizar_ean(data.ean)
+        if not novo_ean:
+            raise HTTPException(status_code=400, detail="EAN inválido")
+        bipe.ean = novo_ean
+
+    db.commit()
+    db.refresh(bipe)
+    item = next((r for r in listar_consolidado_rows(db, norm_txt(bipe.id_inventario)) if int(r["id"]) == int(bipe.id)), None)
+    return {"success": True, "item": item}
 @app.get("/estoque/confronto")
 def confrontar_estoque(id_inventario: str = "", db: Session = Depends(get_db)):
     return montar_confronto_estoque(db, norm_txt(id_inventario))
