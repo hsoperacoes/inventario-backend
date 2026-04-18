@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -37,6 +37,39 @@ app.add_middleware(
 )
 
 Base.metadata.create_all(bind=engine)
+
+MASTER_PASSWORD = "hs1001"
+USER_LOCK_NOTICES = {}
+
+
+def require_admin(request: Request):
+    senha = request.headers.get("x-admin-pass", "")
+    if senha != MASTER_PASSWORD:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+
+
+def set_user_lock_notice(id_inventario: str, usuario: str, grupo: str, quem_fechou: str):
+    USER_LOCK_NOTICES[(norm_txt(id_inventario), norm_txt(usuario))] = {
+        "status": "SECAO_BLOQUEADA",
+        "quemFechou": norm_txt(quem_fechou),
+        "grupo": norm_txt(grupo),
+    }
+
+
+def clear_user_lock_notice(id_inventario: str, usuario: str):
+    USER_LOCK_NOTICES.pop((norm_txt(id_inventario), norm_txt(usuario)), None)
+
+
+def get_user_lock_notice(id_inventario: str, usuario: str):
+    return USER_LOCK_NOTICES.get((norm_txt(id_inventario), norm_txt(usuario)))
+
+
+def clear_inventory_lock_notices(id_inventario: str):
+    alvo = norm_txt(id_inventario)
+    for k in list(USER_LOCK_NOTICES.keys()):
+        if k[0] == alvo:
+            USER_LOCK_NOTICES.pop(k, None)
+
 
 class EtiquetaPendente(Base):
     __tablename__ = "etiquetas_pendentes"
@@ -431,106 +464,69 @@ def montar_confronto_estoque(db: Session, id_inventario: str):
 
 
 
+def montar_status_secao(db: Session, id_inventario: str, usuario: str):
+    inventario = db.get(Inventario, id_inventario)
+    if not inventario:
+        return {"success": False, "message": "Inventário não encontrado"}
 
-@app.get("/estoque/validar")
-def validar_estoque_por_ean(ean: str = "", db: Session = Depends(get_db)):
-    ean_norm = normalizar_ean(ean)
-    if not ean_norm:
+    if norm_txt(inventario.status) != "ABERTO":
         return {
             "success": True,
-            "encontrado": False,
-            "ean": "",
-            "item": None,
-            "message": "EAN não informado"
+            "status": "INVENTARIO_ENCERRADO",
+            "message": "Inventário encerrado.",
         }
 
-    item = buscar_item_estoque_por_ean(db, ean_norm)
-    if not item:
+    notice = get_user_lock_notice(id_inventario, usuario)
+    if notice:
         return {
             "success": True,
-            "encontrado": False,
-            "ean": ean_norm,
-            "item": None
+            "status": notice.get("status", "SECAO_BLOQUEADA"),
+            "quemFechou": notice.get("quemFechou", ""),
+            "grupo": notice.get("grupo", ""),
         }
 
-    ref = norm_txt(getattr(item, "produto", ""))
-    cor = norm_txt(getattr(item, "cor_produ", ""))
-    tamanho = norm_txt(getattr(item, "tamanho", ""))
-    ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
+    ativo = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.usuario == usuario,
+        UsuarioAtivo.id_inventario == id_inventario
+    ).first()
+
+    if not ativo:
+        return {"success": True, "status": "SEM_GRUPO"}
+
+    grupo = db.query(Grupo).filter(
+        Grupo.id == ativo.id_grupo,
+        Grupo.id_inventario == id_inventario
+    ).first()
+
+    if not grupo:
+        return {"success": True, "status": "SEM_GRUPO"}
+
+    total = db.query(func.count(Bipe.id)).filter(
+        Bipe.id_inventario == id_inventario,
+        Bipe.id_grupo == ativo.id_grupo
+    ).scalar() or 0
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == id_inventario,
+        UsuarioAtivo.id_grupo == ativo.id_grupo
+    ).all()
 
     return {
         "success": True,
-        "encontrado": True,
-        "ean": ean_norm,
-        "item": {
-            "ean": ean_norm,
-            "ref": ref,
-            "cor": cor,
-            "tamanho": tamanho,
-            "grade": tamanho,
-            "refCor": ref_cor,
-            "filial": norm_txt(getattr(item, "filial", "")),
-            "qtdEstoque": int(getattr(item, "quantidade", 0) or 0),
-            "labelCompact": f"{ref_cor} {tamanho}".strip(),
-            "label": f"{ref_cor} {tamanho}".strip(),
-        }
+        "status": "LIBERADO",
+        "usuario": usuario,
+        "idGrupo": ativo.id_grupo,
+        "grupo": ativo.grupo_nome,
+        "meta": int(grupo.meta or 0),
+        "count": int(total),
+        "colaborativo": bool(grupo.colaborativo),
+        "membros": [m.usuario for m in membros],
     }
 
 
-@app.get("/estoque/mapa-mini")
-def estoque_mapa_mini(db: Session = Depends(get_db)):
-    itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
-    mapa = {}
-    total = 0
-
-    for item in itens:
-        ean = normalizar_ean(getattr(item, "ean", ""))
-        if not ean:
-            continue
-
-        ref = norm_txt(getattr(item, "produto", ""))
-        cor = norm_txt(getattr(item, "cor_produ", ""))
-        tamanho = norm_txt(getattr(item, "tamanho", ""))
-        ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
-        label = f"{ref_cor} {tamanho}".strip()
-
-        mapa[ean] = label or ean
-        total += 1
-
-    return {
-        "success": True,
-        "mapa": mapa,
-        "total": total,
-        "geradoEm": datetime.utcnow().isoformat()
-    }
-
-@app.get("/etiquetas")
-def get_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
-    return {"success": True, "etiquetas": listar_etiquetas_pendentes(db, norm_txt(id_inventario))}
-
-
-@app.delete("/etiquetas")
-def delete_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
-    query = db.query(EtiquetaPendente)
-    if norm_txt(id_inventario):
-        query = query.filter(EtiquetaPendente.id_inventario == norm_txt(id_inventario))
-    removidas = query.delete(synchronize_session=False)
-    db.commit()
-    return {"success": True, "removidas": int(removidas or 0)}
-
-
-@app.get("/etiquetas/pdf")
-def pdf_etiquetas(id_inventario: str = "", db: Session = Depends(get_db)):
-    etiquetas = listar_etiquetas_pendentes(db, norm_txt(id_inventario))
-    conteudo = gerar_pdf_etiquetas_bytes(etiquetas)
-    nome_base = f"etiquetas_{norm_txt(id_inventario) or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.pdf"
-    nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
-    headers = {
-        "Content-Disposition": f"attachment; filename=\"{nome_seguro}\"; filename*=UTF-8''{quote(nome_base)}",
-        "Access-Control-Expose-Headers": "Content-Disposition",
-        "Cache-Control": "no-store"
-    }
-    return Response(content=conteudo, media_type="application/pdf", headers=headers)
+@app.get("/status/secao")
+def status_secao(usuario: str, id_inventario: str, db: Session = Depends(get_db)):
+    return montar_status_secao(db, id_inventario, usuario)
 
 
 @app.get("/")
@@ -658,6 +654,7 @@ def entrar_grupo(data: EntrarGrupoIn, db: Session = Depends(get_db)):
         db.add(novo)
 
     grupo.status = "RESERVADO"
+    clear_user_lock_notice(data.id_inventario, data.usuario)
     db.commit()
 
     membros_atualizados = db.query(UsuarioAtivo).filter(
@@ -682,6 +679,9 @@ def usuario_ativo(usuario: str, id_inventario: str, db: Session = Depends(get_db
     ).first()
 
     if not ativo:
+        aviso = get_user_lock_notice(id_inventario, usuario)
+        if aviso:
+            return {"ativo": False, "status": aviso.get("status", "SECAO_BLOQUEADA"), "quemFechou": aviso.get("quemFechou", ""), "grupo": aviso.get("grupo", "")}
         return {"ativo": False}
 
     grupo = db.query(Grupo).filter(
@@ -837,6 +837,9 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
 
+    for m in membros:
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario)
+
     grupo.status = "CONCLUIDO"
 
     db.query(UsuarioAtivo).filter(
@@ -861,7 +864,8 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
 
 
 @app.post("/grupos/concluir-forcado")
-def concluir_grupo_forcado(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
+def concluir_grupo_forcado(request: Request, data: ConcluirGrupoIn, db: Session = Depends(get_db)):
+    require_admin(request)
     grupo = db.query(Grupo).filter(
         Grupo.id == data.id_grupo,
         Grupo.id_inventario == data.id_inventario
@@ -879,6 +883,9 @@ def concluir_grupo_forcado(data: ConcluirGrupoIn, db: Session = Depends(get_db))
         UsuarioAtivo.id_inventario == data.id_inventario,
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
+
+    for m in membros:
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario)
 
     grupo.status = "CONCLUIDO"
 
@@ -1130,6 +1137,7 @@ def admin_painel(db: Session = Depends(get_db)):
             "id_inventario": b.id_inventario,
             "id_grupo": b.id_grupo,
             "grupo_nome": b.grupo_nome,
+            "id": b.id,
             "ean": b.ean,
             "hora": str(b.criado_em),
             "label_compact": f"{ref_cor} {tamanho}".strip() if item else "",
@@ -1141,8 +1149,6 @@ def admin_painel(db: Session = Depends(get_db)):
             "ref_cor": ref_cor,
             "nao_encontrado": item is None
         })
-
-    confronto_global = montar_confronto_estoque(db, "")
 
     return {
         "success": True,
@@ -1160,9 +1166,9 @@ def admin_painel(db: Session = Depends(get_db)):
         ],
         "grupos": resumo_grupos,
         "bipes": bipes_out,
-        "totalEstoque": int(confronto_global.get("totalEstoque", 0) or 0),
-        "totalConsolidado": int(confronto_global.get("totalConsolidado", len(bipes_out)) or 0),
-        "percentualConsolidado": float(confronto_global.get("percentualConsolidado", 0) or 0)
+        "totalEstoque": int(sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque)),
+        "totalConsolidado": int(len(bipes_out)),
+        "percentualConsolidado": round((len(bipes_out) / max(1, sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque))) * 100, 1) if itens_estoque else 0
     }
 
 
@@ -1254,3 +1260,126 @@ def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+@app.patch("/inventarios/{id_inventario}/fechar")
+def fechar_inventario(id_inventario: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    inv = db.get(Inventario, id_inventario)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventário não encontrado")
+    inv.status = "FECHADO"
+    db.commit()
+    return {"success": True, "message": "Inventário fechado com sucesso.", "id": inv.id, "status": inv.status}
+
+
+@app.delete("/inventarios/{id_inventario}")
+def excluir_inventario(id_inventario: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    inv = db.get(Inventario, id_inventario)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventário não encontrado")
+
+    db.query(EtiquetaPendente).filter(EtiquetaPendente.id_inventario == id_inventario).delete(synchronize_session=False)
+    db.query(Bipe).filter(Bipe.id_inventario == id_inventario).delete(synchronize_session=False)
+    db.query(UsuarioAtivo).filter(UsuarioAtivo.id_inventario == id_inventario).delete(synchronize_session=False)
+    db.query(Grupo).filter(Grupo.id_inventario == id_inventario).delete(synchronize_session=False)
+    clear_inventory_lock_notices(id_inventario)
+    db.delete(inv)
+    db.commit()
+    return {"success": True, "message": "Inventário excluído com sucesso.", "id": id_inventario}
+
+
+@app.delete("/bipes/{bipe_id}")
+def excluir_bipe(bipe_id: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    bipe = db.query(Bipe).filter(Bipe.id == bipe_id).first()
+    if not bipe:
+        raise HTTPException(status_code=404, detail="Bipe não encontrado")
+    id_inventario = bipe.id_inventario
+    id_grupo = bipe.id_grupo
+    db.delete(bipe)
+    db.commit()
+    total_grupo = db.query(func.count(Bipe.id)).filter(Bipe.id_inventario == id_inventario, Bipe.id_grupo == id_grupo).scalar() or 0
+    return {"success": True, "id": bipe_id, "newCount": int(total_grupo)}
+
+
+@app.get("/etiquetas")
+def get_etiquetas(id_inventario: str = "", request: Request = None, db: Session = Depends(get_db)):
+    if request is not None:
+        require_admin(request)
+    return {"success": True, "etiquetas": listar_etiquetas_pendentes(db, id_inventario)}
+
+
+@app.delete("/etiquetas")
+def limpar_etiquetas(id_inventario: str = "", request: Request = None, db: Session = Depends(get_db)):
+    if request is not None:
+        require_admin(request)
+    query = db.query(EtiquetaPendente)
+    if norm_txt(id_inventario):
+        query = query.filter(EtiquetaPendente.id_inventario == norm_txt(id_inventario))
+    removidas = query.delete(synchronize_session=False)
+    db.commit()
+    return {"success": True, "removidas": int(removidas or 0)}
+
+
+@app.get("/etiquetas/pdf")
+def etiquetas_pdf(id_inventario: str = "", request: Request = None, db: Session = Depends(get_db)):
+    if request is not None:
+        require_admin(request)
+    etiquetas = listar_etiquetas_pendentes(db, id_inventario)
+    conteudo = gerar_pdf_etiquetas_bytes(etiquetas)
+    nome = f"etiquetas_{norm_txt(id_inventario) or 'geral'}.pdf"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{nome}"',
+        "Access-Control-Expose-Headers": "Content-Disposition",
+        "Cache-Control": "no-store"
+    }
+    return Response(content=conteudo, media_type="application/pdf", headers=headers)
+
+
+@app.get("/estoque/validar")
+def validar_estoque_por_ean(ean: str = "", db: Session = Depends(get_db)):
+    ean_norm = normalizar_ean(ean)
+    if not ean_norm:
+        return {"success": True, "encontrado": False, "ean": "", "item": None, "info": None}
+    item = buscar_item_estoque_por_ean(db, ean_norm)
+    if not item:
+        return {"success": True, "encontrado": False, "ean": ean_norm, "item": None, "info": None}
+    ref = norm_txt(getattr(item, "produto", ""))
+    cor = norm_txt(getattr(item, "cor_produ", ""))
+    tamanho = norm_txt(getattr(item, "tamanho", ""))
+    ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
+    info = {
+        "ref": ref,
+        "cor": cor,
+        "tamanho": tamanho,
+        "grade": tamanho,
+        "refCor": ref_cor,
+        "labelCompact": f"{ref_cor} {tamanho}".strip(),
+        "label": f"{ref_cor} {tamanho}".strip()
+    }
+    return {"success": True, "encontrado": True, "ean": ean_norm, "item": info, "info": info}
+
+
+@app.get("/estoque/mapa-mini")
+def get_mapa_estoque_mini(id_inventario: str = "", db: Session = Depends(get_db)):
+    itens = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
+    mapa = {}
+    for item in itens:
+        ean = normalizar_ean(getattr(item, "ean", ""))
+        if not ean:
+            continue
+        ref = norm_txt(getattr(item, "produto", ""))
+        cor = norm_txt(getattr(item, "cor_produ", ""))
+        tamanho = norm_txt(getattr(item, "tamanho", ""))
+        ref_cor = norm_txt(getattr(item, "ref_cor", "")) or montar_ref_cor(ref, cor)
+        texto = f"{ref_cor} {tamanho}".strip()
+        if texto:
+            mapa[ean] = texto
+    return {
+        "success": True,
+        "idInventario": norm_txt(id_inventario),
+        "total": len(mapa),
+        "mapa": mapa,
+        "geradoEm": datetime.now().isoformat()
+    }
