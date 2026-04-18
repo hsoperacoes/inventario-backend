@@ -1150,6 +1150,13 @@ def admin_painel(db: Session = Depends(get_db)):
             "nao_encontrado": item is None
         })
 
+    total_estoque = int(sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque))
+    grupos_concluidos_ids = {str(g.id) for g in grupos if str(getattr(g, "status", "")) == "CONCLUIDO"}
+    total_consolidado_fechado = sum(
+        1 for b in bipes if str(getattr(b, "id_grupo", "")) in grupos_concluidos_ids
+    )
+    percentual_consolidado = round((total_consolidado_fechado / max(1, total_estoque)) * 100, 1) if total_estoque else 0.0
+
     return {
         "success": True,
         "inventarios": [
@@ -1166,9 +1173,9 @@ def admin_painel(db: Session = Depends(get_db)):
         ],
         "grupos": resumo_grupos,
         "bipes": bipes_out,
-        "totalEstoque": int(sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque)),
-        "totalConsolidado": int(len(bipes_out)),
-        "percentualConsolidado": round((len(bipes_out) / max(1, sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque))) * 100, 1) if itens_estoque else 0
+        "totalEstoque": total_estoque,
+        "totalConsolidado": int(total_consolidado_fechado),
+        "percentualConsolidado": percentual_consolidado
     }
 
 
