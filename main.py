@@ -573,6 +573,37 @@ def montar_status_secao(db: Session, id_inventario: str, usuario: str):
     }
 
 
+
+
+@app.get("/consolidado/exportar-eans")
+def exportar_eans_consolidado(id_inventario: str = Query(""), request: Request = None, db: Session = Depends(get_db)):
+    if request is not None:
+        require_admin(request)
+    rows = listar_consolidado_rows(db, norm_txt(id_inventario))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "EANS"
+    ws["A1"] = "EAN"
+    ws["A1"].font = Font(bold=True)
+
+    for i, r in enumerate(rows, start=2):
+        ws.cell(row=i, column=1, value=norm_txt(r.get("ean", "")))
+
+    ws.column_dimensions["A"].width = 22
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    conteudo = buffer.getvalue()
+    nome_base = f"eans_consolidado_{norm_txt(id_inventario) or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+    nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
+
+    return Response(
+        content=conteudo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome_seguro}"'}
+    )
+
 @app.get("/status/secao")
 def status_secao(usuario: str, id_inventario: str, db: Session = Depends(get_db)):
     return montar_status_secao(db, id_inventario, usuario)
@@ -1074,6 +1105,7 @@ def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
 
     nome_grupo = ativo.grupo_nome
     id_grupo = ativo.id_grupo
+    set_user_lock_notice(data.id_inventario, data.usuario, nome_grupo, "Administrador")
     db.delete(ativo)
     db.flush()
 
@@ -1114,6 +1146,9 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         UsuarioAtivo.id_inventario == data.id_inventario,
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
+
+    for m in membros:
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador")
 
     bipes_apagados = db.query(Bipe).filter(
         Bipe.id_inventario == data.id_inventario,
