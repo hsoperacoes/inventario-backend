@@ -136,6 +136,12 @@ class ResetarGrupoIn(BaseModel):
     id_grupo: str
 
 
+class ZerarContagemIn(BaseModel):
+    usuario: str
+    id_inventario: str
+    id_grupo: str
+
+
 class EditarMetaIn(BaseModel):
     id_inventario: str
     id_grupo: str
@@ -1045,12 +1051,9 @@ def tornar_colaborativo(data: TornarColaborativoIn, db: Session = Depends(get_db
 
     grupo.colaborativo = True
     grupo.vagas = vagas
-    if membros and norm_txt(grupo.status) != "CONCLUIDO":
-        grupo.status = "RESERVADO"
-
+    grupo.status = "RESERVADO" if membros else "DISPONIVEL"
     for m in membros:
         clear_user_lock_notice(data.id_inventario, m.usuario)
-
     db.commit()
 
     return {
@@ -1132,6 +1135,45 @@ def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
         "id_grupo": id_grupo,
         "membros_restantes": [m.usuario for m in restantes],
         "bipes_mantidos": int(total_grupo)
+    }
+
+
+
+
+@app.post("/grupos/zerar-contagem")
+def zerar_contagem_grupo(data: ZerarContagemIn, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    grupo = db.query(Grupo).filter(
+        Grupo.id == data.id_grupo,
+        Grupo.id_inventario == data.id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == data.id_inventario,
+        UsuarioAtivo.id_grupo == data.id_grupo
+    ).all()
+
+    bipes_apagados = db.query(Bipe).filter(
+        Bipe.id_inventario == data.id_inventario,
+        Bipe.id_grupo == data.id_grupo
+    ).delete(synchronize_session=False)
+
+    for m in membros:
+        clear_user_lock_notice(data.id_inventario, m.usuario)
+
+    grupo.status = "RESERVADO" if membros else "DISPONIVEL"
+    db.commit()
+
+    return {
+        "success": True,
+        "grupo": grupo.nome,
+        "id_grupo": grupo.id,
+        "bipes_apagados": int(bipes_apagados or 0),
+        "membros_mantidos": [m.usuario for m in membros],
+        "count": 0
     }
 
 
