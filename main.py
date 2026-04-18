@@ -48,11 +48,12 @@ def require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Acesso negado")
 
 
-def set_user_lock_notice(id_inventario: str, usuario: str, grupo: str, quem_fechou: str):
+def set_user_lock_notice(id_inventario: str, usuario: str, grupo: str, quem_fechou: str, acao: str = "CONCLUIDO"):
     USER_LOCK_NOTICES[(norm_txt(id_inventario), norm_txt(usuario))] = {
         "status": "SECAO_BLOQUEADA",
         "quemFechou": norm_txt(quem_fechou),
         "grupo": norm_txt(grupo),
+        "acao": norm_txt(acao or "CONCLUIDO"),
     }
 
 
@@ -130,12 +131,6 @@ class ConcluirGrupoIn(BaseModel):
 
 
 class ResetarGrupoIn(BaseModel):
-    usuario: str
-    id_inventario: str
-    id_grupo: str
-
-
-class ZerarContagemIn(BaseModel):
     usuario: str
     id_inventario: str
     id_grupo: str
@@ -538,6 +533,7 @@ def montar_status_secao(db: Session, id_inventario: str, usuario: str):
             "status": notice.get("status", "SECAO_BLOQUEADA"),
             "quemFechou": notice.get("quemFechou", ""),
             "grupo": notice.get("grupo", ""),
+            "acao": notice.get("acao", "CONCLUIDO"),
         }
 
     ativo = db.query(UsuarioAtivo).filter(
@@ -767,7 +763,7 @@ def usuario_ativo(usuario: str, id_inventario: str, db: Session = Depends(get_db
     if not ativo:
         aviso = get_user_lock_notice(id_inventario, usuario)
         if aviso:
-            return {"ativo": False, "status": aviso.get("status", "SECAO_BLOQUEADA"), "quemFechou": aviso.get("quemFechou", ""), "grupo": aviso.get("grupo", "")}
+            return {"ativo": False, "status": aviso.get("status", "SECAO_BLOQUEADA"), "quemFechou": aviso.get("quemFechou", ""), "grupo": aviso.get("grupo", ""), "acao": aviso.get("acao", "CONCLUIDO")}
         return {"ativo": False}
 
     grupo = db.query(Grupo).filter(
@@ -924,7 +920,7 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario)
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO')
 
     grupo.status = "CONCLUIDO"
 
@@ -971,7 +967,7 @@ def concluir_grupo_forcado(request: Request, data: ConcluirGrupoIn, db: Session 
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario)
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO')
 
     grupo.status = "CONCLUIDO"
 
@@ -1045,14 +1041,18 @@ def tornar_colaborativo(data: TornarColaborativoIn, db: Session = Depends(get_db
     if vagas < 2:
         raise HTTPException(status_code=400, detail="Vagas inválidas")
 
+    membros = listar_membros_grupo(db, data.id_inventario, data.id_grupo)
+
     grupo.colaborativo = True
     grupo.vagas = vagas
-    grupo.status = "RESERVADO" if listar_membros_grupo(db, data.id_inventario, data.id_grupo) else "DISPONIVEL"
-    db.commit()
+    if membros and norm_txt(grupo.status) != "CONCLUIDO":
+        grupo.status = "RESERVADO"
 
-    membros = listar_membros_grupo(db, data.id_inventario, data.id_grupo)
     for m in membros:
         clear_user_lock_notice(data.id_inventario, m.usuario)
+
+    db.commit()
+
     return {
         "success": True,
         "grupo": grupo.nome,
@@ -1114,7 +1114,7 @@ def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
 
     nome_grupo = ativo.grupo_nome
     id_grupo = ativo.id_grupo
-    set_user_lock_notice(data.id_inventario, data.usuario, nome_grupo, "Administrador")
+    set_user_lock_notice(data.id_inventario, data.usuario, nome_grupo, "Administrador", "REMOVIDO")
     db.delete(ativo)
     db.flush()
 
@@ -1132,45 +1132,6 @@ def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
         "id_grupo": id_grupo,
         "membros_restantes": [m.usuario for m in restantes],
         "bipes_mantidos": int(total_grupo)
-    }
-
-
-
-
-@app.post("/grupos/zerar-contagem")
-def zerar_contagem_grupo(data: ZerarContagemIn, request: Request, db: Session = Depends(get_db)):
-    require_admin(request)
-    grupo = db.query(Grupo).filter(
-        Grupo.id == data.id_grupo,
-        Grupo.id_inventario == data.id_inventario
-    ).first()
-
-    if not grupo:
-        raise HTTPException(status_code=404, detail="Grupo não encontrado")
-
-    membros = db.query(UsuarioAtivo).filter(
-        UsuarioAtivo.id_inventario == data.id_inventario,
-        UsuarioAtivo.id_grupo == data.id_grupo
-    ).all()
-
-    bipes_apagados = db.query(Bipe).filter(
-        Bipe.id_inventario == data.id_inventario,
-        Bipe.id_grupo == data.id_grupo
-    ).delete(synchronize_session=False)
-
-    for m in membros:
-        clear_user_lock_notice(data.id_inventario, m.usuario)
-
-    grupo.status = "RESERVADO" if membros else "DISPONIVEL"
-    db.commit()
-
-    return {
-        "success": True,
-        "grupo": grupo.nome,
-        "id_grupo": grupo.id,
-        "bipes_apagados": int(bipes_apagados or 0),
-        "membros_mantidos": [m.usuario for m in membros],
-        "count": 0
     }
 
 
@@ -1196,7 +1157,7 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador")
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador", "RESETADO")
 
     bipes_apagados = db.query(Bipe).filter(
         Bipe.id_inventario == data.id_inventario,
