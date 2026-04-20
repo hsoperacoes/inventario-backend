@@ -35,6 +35,13 @@ class UsuarioAtivo(Base):
 
 
 class Bipe(Base):
+    """
+    Agora armazena bipes agrupados por (usuario, id_inventario, id_grupo, ean).
+    'quantidade' representa quantas vezes aquele EAN foi bipado.
+    'criado_em' é o primeiro bipe; 'atualizado_em' é o último.
+    O painel continua exibindo item por item — cada linha representa 1 unidade
+    expandida via quantidade, sem mudar a experiência visual.
+    """
     __tablename__ = "bipes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -43,19 +50,23 @@ class Bipe(Base):
     id_grupo = Column(String, ForeignKey("grupos.id"), nullable=False)
     grupo_nome = Column(String, nullable=False)
     ean = Column(String, nullable=False)
+    quantidade = Column(Integer, nullable=False, default=1)
     criado_em = Column(DateTime(timezone=True), server_default=func.now())
+    atualizado_em = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class Estoque(Base):
+    """
+    Tabela de estoque sem as colunas filial e grade,
+    que foram removidas por não serem necessárias.
+    """
     __tablename__ = "estoque"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     produto = Column(String, nullable=False)
     cor_produ = Column(String, nullable=False)
-    filial = Column(String, nullable=True)
     tamanho = Column(String, nullable=True)
     quantidade = Column(Integer, nullable=False, default=0)
-    grade = Column(String, nullable=True)
     ean = Column(String, nullable=False, unique=True, index=True)
     ref_cor = Column(String, nullable=True)
     ativo = Column(Boolean, nullable=False, default=True)
