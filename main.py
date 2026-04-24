@@ -13,9 +13,13 @@ import csv
 import io
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from typing import Optional
+
+
+def agora_brasil():
+    return agora_brasil() - timedelta(hours=3)
 
 
 def _import_reportlab():
@@ -84,7 +88,7 @@ class EtiquetaPendente(Base):
     id_inventario = Column(String(64), nullable=False, index=True)
     id_grupo = Column(String(64), nullable=False, default="")
     usuario = Column(String(120), nullable=False, default="")
-    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
+    criado_em = Column(DateTime, nullable=False, default=agora_brasil)
 
 
 Base.metadata.create_all(bind=engine)
@@ -585,7 +589,7 @@ def admin_ping(db: Session = Depends(get_db)):
     return {
         "total_bipes": int(total_bipes),
         "total_usuarios": int(total_usuarios),
-        "ts": datetime.utcnow().isoformat()
+        "ts": agora_brasil().isoformat()
     }
 
 
@@ -767,7 +771,7 @@ def registrar_bipe(data: BipeIn, db: Session = Depends(get_db)):
 
     if existente:
         existente.quantidade += 1
-        existente.atualizado_em = datetime.utcnow()
+        existente.atualizado_em = agora_brasil()
     else:
         novo = Bipe(
             usuario=data.usuario,
@@ -811,7 +815,7 @@ def registrar_bipe_manual(data: ManualBipeIn, db: Session = Depends(get_db)):
 
     if existente:
         existente.quantidade += 1
-        existente.atualizado_em = datetime.utcnow()
+        existente.atualizado_em = agora_brasil()
     else:
         novo = Bipe(
             usuario=data.usuario,
@@ -1237,7 +1241,7 @@ def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get
         raise HTTPException(status_code=400, detail=confronto.get("message") or "Falha ao gerar relatório")
 
     wb = Workbook()
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    agora = agora_brasil().strftime("%d/%m/%Y %H:%M")
     inv = norm_txt(id_inventario) or "—"
 
     def montar_sheet(ws, titulo, cabecalho, linhas):
@@ -1283,7 +1287,7 @@ def gerar_relatorio_confronto(id_inventario: str = "", db: Session = Depends(get
     buf = io.BytesIO()
     wb.save(buf)
     conteudo = buf.getvalue()
-    nome_base = f"relatorio_confronto_{inv or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+    nome_base = f"relatorio_confronto_{inv or 'geral'}_{agora_brasil().strftime('%d%m%Y_%H%M%S')}.xlsx"
     nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
     headers = {
         "Content-Disposition": f"attachment; filename=\"{nome_seguro}\"; filename*=UTF-8''{quote(nome_base)}",
@@ -1333,7 +1337,7 @@ def excluir_bipe(bipe_id: int, request: Request, db: Session = Depends(get_db)):
 
     if bipe.quantidade > 1:
         bipe.quantidade -= 1
-        bipe.atualizado_em = datetime.utcnow()
+        bipe.atualizado_em = agora_brasil()
         db.commit()
     else:
         db.delete(bipe)
@@ -1415,7 +1419,7 @@ def get_mapa_estoque_mini(id_inventario: str = "", db: Session = Depends(get_db)
     return {
         "success": True, "idInventario": norm_txt(id_inventario),
         "total": len(mapa), "mapa": mapa,
-        "geradoEm": datetime.now().isoformat()
+        "geradoEm": agora_brasil().isoformat()
     }
 
 
@@ -1431,20 +1435,18 @@ def exportar_eans_consolidado(id_inventario: str = Query(""), request: Request =
     ws["A1"] = "EAN"
     ws["A1"].font = Font(bold=True)
 
-    seen = set()
     row_num = 2
     for r in rows:
         ean = norm_txt(r.get("ean", ""))
-        if ean and ean not in seen:
+        if ean:
             ws.cell(row=row_num, column=1, value=ean)
-            seen.add(ean)
             row_num += 1
 
     ws.column_dimensions["A"].width = 22
     buffer = io.BytesIO()
     wb.save(buffer)
     conteudo = buffer.getvalue()
-    nome_base = f"eans_consolidado_{norm_txt(id_inventario) or 'geral'}_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+    nome_base = f"eans_consolidado_{norm_txt(id_inventario) or 'geral'}_{agora_brasil().strftime('%d%m%Y_%H%M%S')}.xlsx"
     nome_seguro = re.sub(r'[^A-Za-z0-9._-]+', '_', nome_base)
 
     return Response(
