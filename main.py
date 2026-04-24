@@ -19,7 +19,7 @@ from typing import Optional
 
 
 def agora_brasil():
-    return agora_brasil() - timedelta(hours=3)
+    return datetime.utcnow() - timedelta(hours=3)
 
 
 def _import_reportlab():
@@ -1337,7 +1337,7 @@ def excluir_bipe(bipe_id: int, request: Request, db: Session = Depends(get_db)):
 
     if bipe.quantidade > 1:
         bipe.quantidade -= 1
-        bipe.atualizado_em = agora_brasil()
+        bipe.atualizado_em = datetime.utcnow()
         db.commit()
     else:
         db.delete(bipe)
