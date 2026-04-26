@@ -22,6 +22,15 @@ def agora_brasil():
     return datetime.utcnow() - timedelta(hours=3)
 
 
+def iso_brasil(valor):
+    if not valor:
+        return ""
+    try:
+        return (valor - timedelta(hours=3)).isoformat()
+    except Exception:
+        return str(valor)
+
+
 def _import_reportlab():
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
@@ -88,7 +97,7 @@ class EtiquetaPendente(Base):
     id_inventario = Column(String(64), nullable=False, index=True)
     id_grupo = Column(String(64), nullable=False, default="")
     usuario = Column(String(120), nullable=False, default="")
-    criado_em = Column(DateTime, nullable=False, default=agora_brasil)
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 Base.metadata.create_all(bind=engine)
@@ -267,7 +276,7 @@ def listar_etiquetas_pendentes(db, id_inventario=""):
             "ean": norm_txt(row.ean),
             "refCor": norm_txt(row.ref_cor),
             "grade": norm_txt(row.grade),
-            "data": row.criado_em.isoformat() if row.criado_em else "",
+            "data": iso_brasil(row.criado_em),
             "idInventario": norm_txt(row.id_inventario),
             "idGrupo": norm_txt(row.id_grupo),
             "usuario": norm_txt(row.usuario),
@@ -413,9 +422,7 @@ def _expandir_bipe_row(b, grupos_map, estoque_por_ean):
         ),
         "usuario": norm_txt(b.usuario),
         "ean": normalizar_ean(getattr(b, "ean", "")),
-        "hora": b.atualizado_em.isoformat() if getattr(b, "atualizado_em", None) else (
-            b.criado_em.isoformat() if getattr(b, "criado_em", None) else ""
-        ),
+        "hora": iso_brasil(getattr(b, "atualizado_em", None) or getattr(b, "criado_em", None)),
         "ref": norm_txt(getattr(item, "produto", "")) if item else "",
         "cor": norm_txt(getattr(item, "cor_produ", "")) if item else "",
         "tamanho": norm_txt(getattr(item, "tamanho", "")) if item else "",
@@ -771,7 +778,7 @@ def registrar_bipe(data: BipeIn, db: Session = Depends(get_db)):
 
     if existente:
         existente.quantidade += 1
-        existente.atualizado_em = agora_brasil()
+        existente.atualizado_em = datetime.utcnow()
     else:
         novo = Bipe(
             usuario=data.usuario,
@@ -815,7 +822,7 @@ def registrar_bipe_manual(data: ManualBipeIn, db: Session = Depends(get_db)):
 
     if existente:
         existente.quantidade += 1
-        existente.atualizado_em = agora_brasil()
+        existente.atualizado_em = datetime.utcnow()
     else:
         novo = Bipe(
             usuario=data.usuario,
@@ -1129,9 +1136,7 @@ def admin_painel(db: Session = Depends(get_db)):
         cor = item.cor_produ if item else ""
         tamanho = item.tamanho if item else ""
         ref_cor = item.ref_cor if item else ""
-        hora = b.atualizado_em.isoformat() if getattr(b, "atualizado_em", None) else (
-            b.criado_em.isoformat() if getattr(b, "criado_em", None) else ""
-        )
+        hora = iso_brasil(getattr(b, "atualizado_em", None) or getattr(b, "criado_em", None))
         for i in range(int(b.quantidade or 1)):
             bipes_out.append({
                 "usuario": b.usuario,
