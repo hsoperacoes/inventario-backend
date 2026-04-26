@@ -62,28 +62,73 @@ def require_admin(request: Request):
         raise HTTPException(status_code=403, detail="Acesso negado")
 
 
-def set_user_lock_notice(id_inventario, usuario, grupo, quem_fechou, acao="CONCLUIDO"):
-    USER_LOCK_NOTICES[(norm_txt(id_inventario), norm_txt(usuario))] = {
+def set_user_lock_notice(id_inventario, usuario, grupo, quem_fechou, acao="CONCLUIDO", db=None):
+    chave = (norm_txt(id_inventario), norm_txt(usuario))
+    USER_LOCK_NOTICES[chave] = {
         "status": "SECAO_BLOQUEADA",
         "quemFechou": norm_txt(quem_fechou),
         "grupo": norm_txt(grupo),
         "acao": norm_txt(acao or "CONCLUIDO"),
     }
 
+    if db is not None:
+        aviso = db.query(AvisoUsuario).filter(
+            AvisoUsuario.id_inventario == chave[0],
+            AvisoUsuario.usuario == chave[1]
+        ).first()
+        if not aviso:
+            aviso = AvisoUsuario(id_inventario=chave[0], usuario=chave[1])
+            db.add(aviso)
 
-def clear_user_lock_notice(id_inventario, usuario):
-    USER_LOCK_NOTICES.pop((norm_txt(id_inventario), norm_txt(usuario)), None)
+        aviso.status = "SECAO_BLOQUEADA"
+        aviso.quem_fechou = norm_txt(quem_fechou)
+        aviso.grupo = norm_txt(grupo)
+        aviso.acao = norm_txt(acao or "CONCLUIDO")
 
 
-def get_user_lock_notice(id_inventario, usuario):
-    return USER_LOCK_NOTICES.get((norm_txt(id_inventario), norm_txt(usuario)))
+def clear_user_lock_notice(id_inventario, usuario, db=None):
+    chave = (norm_txt(id_inventario), norm_txt(usuario))
+    USER_LOCK_NOTICES.pop(chave, None)
+
+    if db is not None:
+        db.query(AvisoUsuario).filter(
+            AvisoUsuario.id_inventario == chave[0],
+            AvisoUsuario.usuario == chave[1]
+        ).delete(synchronize_session=False)
 
 
-def clear_inventory_lock_notices(id_inventario):
+def get_user_lock_notice(id_inventario, usuario, db=None):
+    chave = (norm_txt(id_inventario), norm_txt(usuario))
+    aviso_memoria = USER_LOCK_NOTICES.get(chave)
+    if aviso_memoria:
+        return aviso_memoria
+
+    if db is not None:
+        aviso = db.query(AvisoUsuario).filter(
+            AvisoUsuario.id_inventario == chave[0],
+            AvisoUsuario.usuario == chave[1]
+        ).first()
+        if aviso:
+            return {
+                "status": norm_txt(aviso.status) or "SECAO_BLOQUEADA",
+                "quemFechou": norm_txt(aviso.quem_fechou),
+                "grupo": norm_txt(aviso.grupo),
+                "acao": norm_txt(aviso.acao or "CONCLUIDO"),
+            }
+
+    return None
+
+
+def clear_inventory_lock_notices(id_inventario, db=None):
     alvo = norm_txt(id_inventario)
     for k in list(USER_LOCK_NOTICES.keys()):
         if k[0] == alvo:
             USER_LOCK_NOTICES.pop(k, None)
+
+    if db is not None:
+        db.query(AvisoUsuario).filter(
+            AvisoUsuario.id_inventario == alvo
+        ).delete(synchronize_session=False)
 
 
 # ── ETIQUETAS PENDENTES (modelo inline) ─────────────────────────────────────
@@ -97,6 +142,19 @@ class EtiquetaPendente(Base):
     id_inventario = Column(String(64), nullable=False, index=True)
     id_grupo = Column(String(64), nullable=False, default="")
     usuario = Column(String(120), nullable=False, default="")
+    criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AvisoUsuario(Base):
+    __tablename__ = "avisos_usuarios"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_inventario = Column(String(64), nullable=False, index=True)
+    usuario = Column(String(120), nullable=False, index=True)
+    status = Column(String(64), nullable=False, default="SECAO_BLOQUEADA")
+    quem_fechou = Column(String(120), nullable=False, default="")
+    grupo = Column(String(255), nullable=False, default="")
+    acao = Column(String(64), nullable=False, default="CONCLUIDO")
     criado_em = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -533,7 +591,7 @@ def montar_status_secao(db, id_inventario, usuario):
     if norm_txt(inventario.status) != "ABERTO":
         return {"success": True, "status": "INVENTARIO_ENCERRADO", "message": "Inventário encerrado."}
 
-    notice = get_user_lock_notice(id_inventario, usuario)
+    notice = get_user_lock_notice(id_inventario, usuario, db)
     if notice:
         return {
             "success": True,
@@ -694,7 +752,7 @@ def entrar_grupo(data: EntrarGrupoIn, db: Session = Depends(get_db)):
         db.add(novo)
 
     grupo.status = "RESERVADO"
-    clear_user_lock_notice(data.id_inventario, data.usuario)
+    clear_user_lock_notice(data.id_inventario, data.usuario, db)
     db.commit()
 
     membros_atualizados = db.query(UsuarioAtivo).filter(
@@ -717,7 +775,7 @@ def usuario_ativo(usuario: str, id_inventario: str, db: Session = Depends(get_db
     ).first()
 
     if not ativo:
-        aviso = get_user_lock_notice(id_inventario, usuario)
+        aviso = get_user_lock_notice(id_inventario, usuario, db)
         if aviso:
             return {
                 "ativo": False, "status": aviso.get("status", "SECAO_BLOQUEADA"),
@@ -872,7 +930,7 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO')
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO', db)
 
     grupo.status = "CONCLUIDO"
     db.query(UsuarioAtivo).filter(
@@ -904,7 +962,7 @@ def concluir_grupo_forcado(request: Request, data: ConcluirGrupoIn, db: Session 
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO')
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO', db)
 
     grupo.status = "CONCLUIDO"
     db.query(UsuarioAtivo).filter(
@@ -1011,7 +1069,7 @@ def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
 
     nome_grupo = ativo.grupo_nome
     id_grupo = ativo.id_grupo
-    set_user_lock_notice(data.id_inventario, data.usuario, nome_grupo, "Administrador", "REMOVIDO")
+    set_user_lock_notice(data.id_inventario, data.usuario, nome_grupo, "Administrador", "REMOVIDO", db)
     db.delete(ativo)
     db.flush()
 
@@ -1082,7 +1140,7 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
     ).all()
 
     for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador", "RESETADO")
+        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador", "RESETADO", db)
 
     bipes_apagados = db.query(Bipe).filter(
         Bipe.id_inventario == data.id_inventario,
@@ -1321,10 +1379,11 @@ def excluir_inventario(id_inventario: str, request: Request, db: Session = Depen
         raise HTTPException(status_code=404, detail="Inventário não encontrado")
 
     db.query(EtiquetaPendente).filter(EtiquetaPendente.id_inventario == id_inventario).delete(synchronize_session=False)
+    db.query(AvisoUsuario).filter(AvisoUsuario.id_inventario == id_inventario).delete(synchronize_session=False)
     db.query(Bipe).filter(Bipe.id_inventario == id_inventario).delete(synchronize_session=False)
     db.query(UsuarioAtivo).filter(UsuarioAtivo.id_inventario == id_inventario).delete(synchronize_session=False)
     db.query(Grupo).filter(Grupo.id_inventario == id_inventario).delete(synchronize_session=False)
-    clear_inventory_lock_notices(id_inventario)
+    clear_inventory_lock_notices(id_inventario, db)
     db.delete(inv)
     db.commit()
     return {"success": True, "message": "Inventário excluído com sucesso.", "id": id_inventario}
