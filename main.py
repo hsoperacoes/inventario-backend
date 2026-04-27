@@ -1054,6 +1054,89 @@ def renomear_grupo(data: RenomearGrupoIn, db: Session = Depends(get_db)):
     return {"success": True, "grupo": novo_nome, "id_grupo": grupo.id}
 
 
+@app.delete("/grupos/{id_inventario}/{id_grupo}")
+def excluir_grupo(id_inventario: str, id_grupo: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+
+    grupo = db.query(Grupo).filter(
+        Grupo.id == id_grupo,
+        Grupo.id_inventario == id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == id_inventario,
+        UsuarioAtivo.id_grupo == id_grupo
+    ).all()
+
+    if membros:
+        raise HTTPException(status_code=400, detail="Não é possível excluir grupo com conferente ativo. Remova ou resete o grupo primeiro.")
+
+    total_bipes = contar_bipes_grupo(db, id_inventario, id_grupo)
+    if int(total_bipes or 0) > 0:
+        raise HTTPException(status_code=400, detail="Não é possível excluir grupo com bipes. Zere ou resete o grupo primeiro.")
+
+    db.query(Bipe).filter(
+        Bipe.id_inventario == id_inventario,
+        Bipe.id_grupo == id_grupo
+    ).delete(synchronize_session=False)
+
+    db.delete(grupo)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Grupo excluído com sucesso.",
+        "id_inventario": id_inventario,
+        "id_grupo": id_grupo
+    }
+
+
+@app.delete("/grupos/{id_grupo}")
+def excluir_grupo_query(id_grupo: str, request: Request, id_inventario: str = Query(""), db: Session = Depends(get_db)):
+    require_admin(request)
+
+    if not norm_txt(id_inventario):
+        raise HTTPException(status_code=400, detail="id_inventario obrigatório")
+
+    grupo = db.query(Grupo).filter(
+        Grupo.id == id_grupo,
+        Grupo.id_inventario == id_inventario
+    ).first()
+
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    membros = db.query(UsuarioAtivo).filter(
+        UsuarioAtivo.id_inventario == id_inventario,
+        UsuarioAtivo.id_grupo == id_grupo
+    ).all()
+
+    if membros:
+        raise HTTPException(status_code=400, detail="Não é possível excluir grupo com conferente ativo. Remova ou resete o grupo primeiro.")
+
+    total_bipes = contar_bipes_grupo(db, id_inventario, id_grupo)
+    if int(total_bipes or 0) > 0:
+        raise HTTPException(status_code=400, detail="Não é possível excluir grupo com bipes. Zere ou resete o grupo primeiro.")
+
+    db.query(Bipe).filter(
+        Bipe.id_inventario == id_inventario,
+        Bipe.id_grupo == id_grupo
+    ).delete(synchronize_session=False)
+
+    db.delete(grupo)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Grupo excluído com sucesso.",
+        "id_inventario": id_inventario,
+        "id_grupo": id_grupo
+    }
+
+
 @app.post("/grupos/remover-do-grupo")
 def remover_do_grupo(data: RemoverDoGrupoIn, db: Session = Depends(get_db)):
     ativo = db.query(UsuarioAtivo).filter(
