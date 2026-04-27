@@ -294,10 +294,19 @@ def buscar_item_estoque_por_ean(db, ean):
     ean_norm = normalizar_ean(ean)
     if not ean_norm:
         return None
+
+    item = db.query(Estoque).filter(
+        Estoque.ativo.is_(True),
+        Estoque.ean == ean_norm
+    ).first()
+    if item:
+        return item
+
+    # Fallback de segurança para bases antigas com EAN não normalizado.
     candidatos = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
-    for item in candidatos:
-        if normalizar_ean(getattr(item, "ean", "")) == ean_norm:
-            return item
+    for row in candidatos:
+        if normalizar_ean(getattr(row, "ean", "")) == ean_norm:
+            return row
     return None
 
 
@@ -1251,62 +1260,109 @@ def admin_painel(db: Session = Depends(get_db)):
     usuarios = db.query(UsuarioAtivo).all()
     grupos = db.query(Grupo).all()
     bipes_raw = db.query(Bipe).all()
-    itens_estoque = db.query(Estoque).filter(Estoque.ativo.is_(True)).all()
 
-    estoque_por_ean = {str(normalizar_ean(item.ean or "")): item for item in itens_estoque}
+    eans_bipados = sorted({
+        normalizar_ean(getattr(b, "ean", ""))
+        for b in bipes_raw
+        if normalizar_ean(getattr(b, "ean", ""))
+    })
+
+    estoque_por_ean = {}
+    if eans_bipados:
+        itens_estoque = db.query(Estoque).filter(
+            Estoque.ativo.is_(True),
+            Estoque.ean.in_(eans_bipados)
+        ).all()
+        estoque_por_ean = {
+            str(normalizar_ean(item.ean or "")): item
+            for item in itens_estoque
+        }
+
+    total_estoque = int(
+        db.query(func.coalesce(func.sum(Estoque.quantidade), 0))
+        .filter(Estoque.ativo.is_(True))
+        .scalar() or 0
+    )
+
+    membros_por_grupo = defaultdict(list)
+    for u in usuarios:
+        membros_por_grupo[(str(u.id_inventario), str(u.id_grupo))].append(u.usuario)
+
+    contagem_por_grupo = defaultdict(int)
+    for b in bipes_raw:
+        contagem_por_grupo[(str(b.id_inventario), str(b.id_grupo))] += int(getattr(b, "quantidade", 1) or 1)
 
     resumo_grupos = []
     for g in grupos:
-        total = contar_bipes_grupo(db, g.id_inventario, g.id)
-        membros = db.query(UsuarioAtivo).filter(
-            UsuarioAtivo.id_inventario == g.id_inventario,
-            UsuarioAtivo.id_grupo == g.id
-        ).all()
+        chave = (str(g.id_inventario), str(g.id))
         resumo_grupos.append({
-            "id": g.id, "nome": g.nome, "id_inventario": g.id_inventario,
-            "meta": g.meta, "status": g.status, "colaborativo": g.colaborativo,
-            "membros": [m.usuario for m in membros], "bipes": total
+            "id": g.id,
+            "nome": g.nome,
+            "id_inventario": g.id_inventario,
+            "meta": g.meta,
+            "status": g.status,
+            "colaborativo": g.colaborativo,
+            "vagas": getattr(g, "vagas", 1),
+            "membros": membros_por_grupo.get(chave, []),
+            "bipes": int(contagem_por_grupo.get(chave, 0))
         })
 
-    # Expande bipes agrupados para exibição item por item no painel
-    grupos_map = {str(g.id): g for g in grupos}
+    # Expande bipes agrupados para exibição item por item no painel.
+    # As informações do estoque já vão prontas para o ADM não precisar chamar /estoque/validar por EAN.
     bipes_out = []
     for b in bipes_raw:
         item = estoque_por_ean.get(normalizar_ean(b.ean or ""))
-        ref = item.produto if item else ""
-        cor = item.cor_produ if item else ""
-        tamanho = item.tamanho if item else ""
-        ref_cor = item.ref_cor if item else ""
+        ref = norm_txt(getattr(item, "produto", "")) if item else ""
+        cor = norm_txt(getattr(item, "cor_produ", "")) if item else ""
+        tamanho = norm_txt(getattr(item, "tamanho", "")) if item else ""
+        ref_cor = norm_txt(getattr(item, "ref_cor", "")) if item else ""
+        if item and not ref_cor:
+            ref_cor = montar_ref_cor(ref, cor)
+
         hora = iso_brasil(getattr(b, "atualizado_em", None) or getattr(b, "criado_em", None))
-        for i in range(int(b.quantidade or 1)):
+        qtd = int(getattr(b, "quantidade", 1) or 1)
+
+        for i in range(qtd):
             bipes_out.append({
                 "usuario": b.usuario,
                 "id_inventario": b.id_inventario,
                 "id_grupo": b.id_grupo,
                 "grupo_nome": b.grupo_nome,
                 "id": int(b.id) * 10000 + i,
-                "ean": b.ean,
+                "ean": normalizar_ean(b.ean),
                 "hora": hora,
                 "label_compact": f"{ref_cor} {tamanho}".strip() if item else "",
-                "ref": ref, "cor": cor, "tamanho": tamanho,
-                "grade": tamanho, "filial": "",
-                "ref_cor": ref_cor, "nao_encontrado": item is None
+                "ref": ref,
+                "cor": cor,
+                "tamanho": tamanho,
+                "grade": tamanho,
+                "filial": "",
+                "ref_cor": ref_cor,
+                "nao_encontrado": item is None
             })
 
-    total_estoque = int(sum(int(getattr(i, "quantidade", 0) or 0) for i in itens_estoque))
     grupos_concluidos_ids = {str(g.id) for g in grupos if str(getattr(g, "status", "")) == "CONCLUIDO"}
     total_consolidado_fechado = sum(
-        int(b.quantidade or 1)
+        int(getattr(b, "quantidade", 1) or 1)
         for b in bipes_raw
         if str(getattr(b, "id_grupo", "")) in grupos_concluidos_ids
     )
+
     percentual_consolidado = round((total_consolidado_fechado / max(1, total_estoque)) * 100, 1) if total_estoque else 0.0
 
     return {
         "success": True,
-        "inventarios": [{"id": i.id, "nome": i.nome, "senha": i.senha, "status": i.status} for i in inventarios],
+        "inventarios": [
+            {"id": i.id, "nome": i.nome, "senha": i.senha, "status": i.status}
+            for i in inventarios
+        ],
         "usuarios_ativos": [
-            {"usuario": u.usuario, "id_inventario": u.id_inventario, "id_grupo": u.id_grupo, "grupo_nome": u.grupo_nome}
+            {
+                "usuario": u.usuario,
+                "id_inventario": u.id_inventario,
+                "id_grupo": u.id_grupo,
+                "grupo_nome": u.grupo_nome
+            }
             for u in usuarios
         ],
         "grupos": resumo_grupos,
