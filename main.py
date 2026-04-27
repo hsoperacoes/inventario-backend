@@ -937,9 +937,10 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
         UsuarioAtivo.id_inventario == data.id_inventario,
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
+    membros_removidos = [m.usuario for m in membros]
 
-    for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO', db)
+    for usuario_membro in membros_removidos:
+        set_user_lock_notice(data.id_inventario, usuario_membro, grupo.nome, data.usuario, 'CONCLUIDO', db)
 
     grupo.status = "CONCLUIDO"
     db.query(UsuarioAtivo).filter(
@@ -950,7 +951,7 @@ def concluir_grupo(data: ConcluirGrupoIn, db: Session = Depends(get_db)):
 
     return {
         "success": True, "grupo": grupo.nome, "id_grupo": grupo.id,
-        "count": total_grupo, "membros_removidos": [m.usuario for m in membros],
+        "count": total_grupo, "membros_removidos": membros_removidos,
         "finalizado_por": data.usuario, "forcado": False
     }
 
@@ -969,9 +970,10 @@ def concluir_grupo_forcado(request: Request, data: ConcluirGrupoIn, db: Session 
         UsuarioAtivo.id_inventario == data.id_inventario,
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
+    membros_removidos = [m.usuario for m in membros]
 
-    for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, data.usuario, 'CONCLUIDO', db)
+    for usuario_membro in membros_removidos:
+        set_user_lock_notice(data.id_inventario, usuario_membro, grupo.nome, data.usuario, 'CONCLUIDO', db)
 
     grupo.status = "CONCLUIDO"
     db.query(UsuarioAtivo).filter(
@@ -983,7 +985,7 @@ def concluir_grupo_forcado(request: Request, data: ConcluirGrupoIn, db: Session 
     return {
         "success": True, "grupo": grupo.nome, "id_grupo": grupo.id,
         "count": total_grupo, "forcado": True,
-        "membros_removidos": [m.usuario for m in membros],
+        "membros_removidos": membros_removidos,
         "finalizado_por": data.usuario
     }
 
@@ -1231,8 +1233,10 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
         UsuarioAtivo.id_grupo == data.id_grupo
     ).all()
 
-    for m in membros:
-        set_user_lock_notice(data.id_inventario, m.usuario, grupo.nome, "Administrador", "RESETADO", db)
+    membros_removidos = [m.usuario for m in membros]
+
+    for usuario_membro in membros_removidos:
+        set_user_lock_notice(data.id_inventario, usuario_membro, grupo.nome, "Administrador", "RESETADO", db)
 
     bipes_apagados = db.query(Bipe).filter(
         Bipe.id_inventario == data.id_inventario,
@@ -1250,7 +1254,7 @@ def resetar_grupo(data: ResetarGrupoIn, db: Session = Depends(get_db)):
     return {
         "success": True, "grupo": grupo.nome, "id_grupo": grupo.id,
         "bipes_apagados": int(bipes_apagados or 0),
-        "membros_removidos": [m.usuario for m in membros]
+        "membros_removidos": membros_removidos
     }
 
 
